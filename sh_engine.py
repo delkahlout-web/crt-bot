@@ -22,7 +22,7 @@ NY = ZoneInfo("America/New_York")
 
 DEFAULTS = dict(
     chartTF=5, mainTF=15, pvL=3, pvR=2, depthATR=1.0, clusterTol=0.3, usePsych=True, maxActive=30,
-    trigMode="both", onlyStrong=False, mainOrStrong=False, strictBreak=True, useBody=True, bodyMin=0.6, farATR=1.0,
+    trigMode="both", trigOther="main", onlyStrong=False, mainOrStrong=False, strictBreak=True, useBody=True, bodyMin=0.6, farATR=1.0,
     farMode="limit", retestBars=6,
     useRsiMax=True, rsiLen=14, rsiMax=70,
     bufPips=10, pipSize=0.1, minSLatr=1.0, maxSLatr=0,
@@ -236,7 +236,8 @@ def run_engine(chart, main, P):
             up = lv["isH"] and C[i] > ref
             dn = (not lv["isH"]) and C[i] < ref
             if up or dn:
-                tm = P["trigMode"]
+                # طوكيو: trigMode (كل المستويات). لندن/نيويورك: trigOther (الأساسي 15m فقط) لأن كسر المستويات الفرعية الضعيفة هناك كان خاسراً
+                tm = P["trigMode"] if (not sessOn or sessOn[0] == "tokyo") else (P.get("trigOther") or P["trigMode"])
                 tfOK = tm == "both" or (tm == "sub" and not lv["isMain"]) or (tm == "main" and lv["isMain"])
                 if tfOK and ((not P["onlyStrong"]) or lv["strong"]) and ((not P["mainOrStrong"]) or lv["isMain"] or lv["strong"]):
                     if up and C[i - 1] <= ref and (isnan(brkHi) or lv["lvl"] > brkHi):

@@ -59,12 +59,12 @@ class Telegram:
         self.token = token
         self.chat_id = chat_id
 
-    def send(self, text):
+    def send(self, text, silent=False):
         for attempt in range(3):
             try:
                 r = requests.post(self.base + "/sendMessage",
                                   data={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML",
-                                        "disable_web_page_preview": "true"}, timeout=15)
+                                        "disable_web_page_preview": "true", "disable_notification": "true" if silent else "false"}, timeout=15)
                 if r.ok:
                     return True
                 log(f"Telegram error {r.status_code}: {r.text[:200]}".replace(self.token, "***") if self.token else "Telegram error")

@@ -14,7 +14,7 @@ import requests
 import yfinance as yf
 
 from sh_engine import run_engine, DEFAULTS
-from sh_messages import message, ev_key, NAME
+from sh_messages import message, ev_key, NAME, fmt_time
 import crt_bot as core                      # Telegram فقط
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +63,7 @@ def yf_candles(ticker, interval, period, minutes):
 
 
 def commit_state():
-    """داخل GitHub Actions: يحفظ الحالة فوراً بعد كل إرسال حتى لا تتكرر الرسائل لو انقطع التشغيل."""
+    """داخل GitHub Actions: يحفظ الحالة فوراً (3 محاولات) حتى لا تتكرر الرسائل ولا يظن الحارس أن البوت معلّق."""
     if os.environ.get("GITHUB_ACTIONS") != "true":
         return
     try:
@@ -71,9 +71,15 @@ def commit_state():
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
         run("git", "config", "user.name", "sh-bot"); run("git", "config", "user.email", "sh-bot@users.noreply.github.com")
         run("git", "add", "sh_state.json")
-        if run("git", "diff", "--cached", "--quiet").returncode != 0:
-            run("git", "commit", "-m", "sh state")
-            run("git", "pull", "--rebase", "-q"); run("git", "push")
+        if run("git", "diff", "--cached", "--quiet").returncode == 0:
+            return
+        run("git", "commit", "-m", "sh state")
+        for k in range(3):
+            run("git", "pull", "--rebase", "-q")
+            if run("git", "push").returncode == 0:
+                return
+            time.sleep(3 * (k + 1))
+        log("تعذّر دفع الحالة بعد 3 محاولات")
     except Exception as ex:
         log(f"تعذّر حفظ الحالة: {ex}")
 
@@ -168,6 +174,7 @@ def compute(cfg, state):
     now = time.time()
     chart = yf_candles(cfg["ticker"], "5m", "30d", P["chartTF"])
     live, src = LIVE.get(cfg["ticker"]), "Yahoo"
+    cfg["_meta"] = dict(mode="closed", src="Yahoo", age=None)
     if P["chartTF"] == 5 and P["mainTF"] == 15:
         rt, name = realtime_5m(now)
         merged, s = merge_realtime(chart, rt, now)
@@ -175,9 +182,13 @@ def compute(cfg, state):
             chart = merged; src = f"{name} لحظي"
             live = chart[-1]["close"]
             main = resample(chart, 15)
+            cfg["_meta"] = dict(mode="live", src=name, age=(now - chart[-1]["time"] - 300) / 60)
             log(f"مصدر الأسعار: Yahoo (تاريخ) + {name} (لحظي) | آخر شمعة مغلقة قبل {(now - chart[-1]['time'] - 300) / 60:.1f} دقيقة | مواءمة {s:+.2f}$")
         else:
             main = yf_candles(cfg["ticker"], "15m", "30d", P["mainTF"])
+            age_y = (now - chart[-1]["time"] - 300) / 60
+            # Yahoo حديث (< 40 دقيقة) لكن اللحظي فشل ⇒ السوق مفتوح والمصدر اللحظي معطّل؛ وإلا فالسوق مغلق غالباً
+            cfg["_meta"] = dict(mode="degraded" if age_y < 40 else "closed", src="Yahoo", age=age_y)
             log("تعذّر الدمج اللحظي (السوق مغلق أو المصدر غير متاح): نعتمد Yahoo المتأخر")
     else:
         main = yf_candles(cfg["ticker"], "15m", "30d", P["mainTF"])
@@ -191,6 +202,33 @@ def compute(cfg, state):
         else:
             cfg["dataNote"] = "الأسعار بلا تصحيح الآن (السوق مغلق)، وقد تزيد 15–28$ عن شارتك: اعتمد على المسافات."
     return run_engine(chart, main, P), chart[-1]["time"], P
+
+
+def code_changed():
+    """هل على GitHub نسخة أحدث من ملفات البوت؟ (للتحديث الذاتي دون تدخل يدوي)"""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return False
+    try:
+        import subprocess
+        run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
+        run("git", "fetch", "-q", "origin", "main")
+        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py")
+        return bool(d.stdout.strip())
+    except Exception:
+        return False
+
+
+def heartbeat_text(cfg, P):
+    m = cfg.get("_meta", {}); tz = cfg.get("displayTz", "Asia/Hebron")
+    now = fmt_time(time.time(), tz)
+    if m.get("mode") == "live":
+        data = f"📡 البيانات لحظية ({m['src']}) — آخر شمعة مغلقة قبل {m['age']:.1f} دقيقة ✅"
+    elif m.get("mode") == "degraded":
+        data = "⚠️ المصدر اللحظي معطّل الآن؛ البيانات متأخرة 10–15 دقيقة (قد تتأخر الإشارات)"
+    else:
+        data = "🌙 السوق مغلق الآن (عطلة نهاية الأسبوع أو استراحة)، والبوت يعمل وينتظر الافتتاح"
+    return (f"🟦 <b>{NAME} — البوت حيّ ✅</b>\n{data}\n"
+            f"⚙️ الإعداد: طوكيو كل المستويات | لندن/نيويورك مستويات 15m | TP1 {P['tp1R']:g}R / TP2 {P['rr']:g}R\n🕒 {now}")
 
 
 def main():
@@ -220,9 +258,12 @@ def main():
     deadline = time.time() + loop_min * 60
     sent = set(state["sent"])
     max_age = cfg.get("maxAgeMin", 60) * 60
+    beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
+    errs = 0; last_chk = time.time()
     while True:
         try:
             evs, last_t, P = compute(cfg, state)
+            errs = 0
             fresh = [e for e in evs if e["bar_time"] >= time.time() - max_age and ev_key(e) not in sent]
             log(f"{NAME} | آخر شمعة مغلقة: {dt.datetime.fromtimestamp(last_t, dt.timezone.utc):%Y-%m-%d %H:%M} UTC | أحداث جديدة: {len(fresh)}")
             for e in fresh:
@@ -231,13 +272,34 @@ def main():
                     log(f"أُرسل: {e['kind']} {ev_key(e)}")
                     sent.add(ev_key(e))
             state["sent"] = list(sent)
+            now = time.time(); meta = cfg.get("_meta", {})
+            dirty = bool(fresh)
+            # تنبيه عند تعطّل المصدر اللحظي أثناء السوق (مرة كل ساعة كحد أقصى)
+            if meta.get("mode") == "degraded" and now - state.get("warn", 0) >= 3600:
+                if tg.send("⚠️ <b>تنبيه SH:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر الإشارات. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر."):
+                    state["warn"] = now; dirty = True
+            # نبض: «البوت حيّ» كل ساعتين (صامت بلا صوت)
+            if beat_every > 0 and now - state.get("beat", 0) >= beat_every:
+                if tg.send(heartbeat_text(cfg, P), silent=True):
+                    state["beat"] = now; dirty = True
             save_state(state)
-            if fresh:
+            if dirty:
                 commit_state()
         except Exception as ex:
-            log(f"خطأ: {ex}")
+            errs += 1
+            log(f"خطأ ({errs}): {ex}")
+            if errs >= 5 and time.time() - state.get("warn", 0) >= 3600:       # 5 أخطاء متتالية ≈ 5 دقائق
+                if tg.send(f"⚠️ <b>تنبيه SH:</b> البوت يواجه أخطاء متكررة منذ دقائق ولا يستطيع جلب الأسعار. سيعيد المحاولة تلقائياً.\nآخر خطأ: {str(ex)[:150]}"):
+                    state["warn"] = time.time(); save_state(state)
         if time.time() + 60 >= deadline:
             break
+        # تحديث ذاتي: إن رُفعت نسخة أحدث من الكود، أعد التشغيل بها دون تدخل
+        if time.time() - last_chk >= 300:
+            last_chk = time.time()
+            if code_changed():
+                log("وُجدت نسخة أحدث من الكود: إعادة التشغيل بها")
+                commit_state()
+                os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((deadline - time.time()) / 60, 1):.1f}"])
         time.sleep(60)
 
 
