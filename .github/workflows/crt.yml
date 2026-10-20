@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   run:
@@ -24,6 +25,12 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: SH watchdog
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python watchdog.py
+
       - name: Install
         run: pip install -r requirements.txt
 
@@ -31,6 +38,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OANDA_TOKEN: ${{ secrets.OANDA_TOKEN }}
           PYTHONIOENCODING: utf-8
         run: python crt_bot_actions.py
 
