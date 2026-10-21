@@ -109,8 +109,7 @@ def alert_text(c, cur, tz, P):
     move = "يقترب من الأعلى" if above else "يقترب من الأسفل"
     return (f"{BANNER}\n⚠️ <b>السعر قرب من {side}</b>\n{icon} المستوى: <b>{c['price']:.2f}</b>\n{LINE}\n"
             f"📍 السعر الآن: <b>{cur:.2f}</b> ({move})\n📏 المسافة: {abs(d):.2f}$ ({pts:.0f} نقطة)\n"
-            f"🏷️ النوع: {desc}\n{LINE}\n🕒 {fmt_time(time.time(), tz)}\n"
-            "<i>تنبيه بالاقتراب فقط وليس إشارة دخول. الأسعار تقديرية بفرق نحو 1$ عن شارتك.</i>")
+            f"🏷️ النوع: {desc}\n{LINE}\n🕒 {fmt_time(time.time(), tz)}")
 
 
 class Msnr:
