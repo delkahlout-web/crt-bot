@@ -1,1 +1,1 @@
-{"h1": [], "alerts": {"resistance|4143.2": {"p": 4143.2, "role": "resistance", "t": 1792585218.0805914, "armed": true}, "support|4124.9": {"p": 4124.92, "role": "support", "t": 1792586156.0188835, "armed": false}}, "snap": 1792585024.6808157, "day": "2026-10-21", "dayN": 2}
+{"h1": [], "alerts": {"support|4124.9": {"p": 4124.92, "role": "support", "t": 1792586156.0188835, "armed": true}, "resistance|4143.2": {"p": 4143.2, "role": "resistance", "t": 1792588074.9497285, "armed": false}}, "snap": 1792585024.6808157, "day": "2026-10-21", "dayN": 3}
