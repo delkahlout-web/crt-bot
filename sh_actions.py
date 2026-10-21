@@ -107,6 +107,62 @@ def calc_offset(state, sym, live):
     return new
 
 
+PERSIST = {}                  # شموع فوري محفوظة من التشغيل السابق (فيبدأ التشغيل الجديد دافئاً)
+SPOT_BUF = []                 # (epoch, price) عينات gold-api لبناء شموع 5 دقائق لحظية
+START_T = time.time()
+
+
+def sample_spot(sym="XAU"):
+    try:
+        p = float(requests.get(SPOT_URL.format(sym), timeout=8, headers={"User-Agent": "Mozilla/5.0"}).json()["price"])
+        if p > 0:
+            SPOT_BUF.append((time.time(), p)); del SPOT_BUF[:-6000]
+    except Exception:
+        pass
+
+
+def spot_bars(now):
+    """شموع 5 دقائق مكتملة من عينات الذهب الفوري (يُشترط تغطية كافية للنافذة حتى لا نبني شمعة من عينة وحيدة)."""
+    groups = {}
+    for t, p in SPOT_BUF:
+        groups.setdefault(int(t) // 300 * 300, []).append((t, p))
+    out = []
+    for st in sorted(groups):
+        g = groups[st]; end = st + 300
+        if end > now or len(g) < 3 or g[0][0] - st > 150 or end - g[-1][0] > 100:
+            continue
+        ps = [p for _, p in g]
+        out.append(dict(time=st, open=ps[0], high=max(ps), low=min(ps), close=ps[-1]))
+    have = {b["time"] for b in out}
+    out += [b for t, b in PERSIST.items() if t not in have and t + 300 <= now and now - t < 3 * 3600]
+    return sorted(out, key=lambda b: b["time"])
+
+
+def merge_spot(yb, sb, now):
+    """تاريخ Yahoo (يُحذف آخر 20 دقيقة منه لأنها قد تكون ناقصة) مُنزَّل إلى مستوى الذهب الفوري بوسيط فرق الإغلاقات في التقاطع، ثم تُلصق شموع الفوري."""
+    yb = [b for b in yb if b["time"] + 300 <= now - 1200]
+    if not yb or not sb or now - (yb[-1]["time"] + 300) > 3600:
+        return yb, None
+    sd = {b["time"]: b for b in sb}
+    diffs = sorted(b["close"] - sd[b["time"]]["close"] for b in yb[-48:] if b["time"] in sd)
+    if len(diffs) < 3:
+        return yb, None
+    s = diffs[len(diffs) // 2]
+    new = [b for b in sb if b["time"] > yb[-1]["time"]]
+    if not new or (new[0]["time"] - yb[-1]["time"]) // 300 > 5:
+        return yb, None
+    shifted = [dict(b, open=b["open"] - s, high=b["high"] - s, low=b["low"] - s, close=b["close"] - s) for b in yb]
+    filled = []; prev = yb[-1]["time"]; lc = yb[-1]["close"] - s; gaps = 0
+    for b in new:
+        t = prev + 300
+        while t < b["time"]:
+            filled.append(dict(time=t, open=lc, high=lc, low=lc, close=lc)); t += 300; gaps += 1
+        filled.append(b); prev = b["time"]; lc = b["close"]
+    if gaps > 4:
+        return yb, None
+    return shifted + filled, s
+
+
 def realtime_5m(now):
     """شموع 5 دقائق مكتملة لحظياً من الذهب الرقمي PAXG (Kraken ثم OKX). Yahoo متأخر نحو 10–15 دقيقة، وهذا بلا تأخير."""
     try:
@@ -173,32 +229,35 @@ def compute(cfg, state):
     P = params(cfg)
     now = time.time()
     chart = yf_candles(cfg["ticker"], "5m", "30d", P["chartTF"])
-    live, src = LIVE.get(cfg["ticker"]), "Yahoo"
+    live, src, merged_ok = LIVE.get(cfg["ticker"]), "Yahoo", False
     cfg["_meta"] = dict(mode="closed", src="Yahoo", age=None)
     if P["chartTF"] == 5 and P["mainTF"] == 15:
-        rt, name = realtime_5m(now)
-        merged, s = merge_realtime(chart, rt, now)
+        merged, s = merge_spot(chart, spot_bars(now), now)
         if s is not None:
-            chart = merged; src = f"{name} لحظي"
-            live = chart[-1]["close"]
+            chart = merged; merged_ok = True; src = "الذهب الفوري"
             main = resample(chart, 15)
-            cfg["_meta"] = dict(mode="live", src=name, age=(now - chart[-1]["time"] - 300) / 60)
-            log(f"مصدر الأسعار: Yahoo (تاريخ) + {name} (لحظي) | آخر شمعة مغلقة قبل {(now - chart[-1]['time'] - 300) / 60:.1f} دقيقة | مواءمة {s:+.2f}$")
+            age = (now - chart[-1]["time"] - 300) / 60
+            cfg["_meta"] = dict(mode="live", src=src, age=age)
+            cfg["dataNote"] = f"الأسعار: Yahoo (تاريخ) + الذهب الفوري (لحظي)، مواءمة {s:+.1f}$ — تقارب شارتك بفرق نحو 1$: اعتمد على المسافات."
+            log(f"مصدر الأسعار: Yahoo (تاريخ) + الذهب الفوري (لحظي) | آخر شمعة مغلقة قبل {age:.1f} دقيقة | مواءمة {s:+.2f}$ | عينات {len(SPOT_BUF)}")
         else:
             main = yf_candles(cfg["ticker"], "15m", "30d", P["mainTF"])
             age_y = (now - chart[-1]["time"] - 300) / 60
-            # Yahoo حديث (< 40 دقيقة) لكن اللحظي فشل ⇒ السوق مفتوح والمصدر اللحظي معطّل؛ وإلا فالسوق مغلق غالباً
-            cfg["_meta"] = dict(mode="degraded" if age_y < 40 else "closed", src="Yahoo", age=age_y)
-            log("تعذّر الدمج اللحظي (السوق مغلق أو المصدر غير متاح): نعتمد Yahoo المتأخر")
+            if age_y >= 40:
+                mode = "closed"
+            else:
+                mode = "warming" if now - START_T < 2700 else "degraded"        # أول 45 دقيقة: تجميع عينات الفوري
+            cfg["_meta"] = dict(mode=mode, src="Yahoo", age=age_y)
+            log(f"الدمج اللحظي غير متاح ({mode}): نعتمد Yahoo المتأخر")
     else:
         main = yf_candles(cfg["ticker"], "15m", "30d", P["mainTF"])
-    if cfg.get("spotCorrection", True):
-        fresh = src != "Yahoo" or (now - (chart[-1]["time"] + 300)) <= 1500
+    if not merged_ok and cfg.get("spotCorrection", True):
+        fresh = (now - (chart[-1]["time"] + 300)) <= 1500
         off = calc_offset(state, cfg.get("spotSym", "XAU"), live) if fresh else state.get("off")
         if off is not None:
             state["off"] = off
             chart, main = shift(chart, off), shift(main, off)
-            cfg["dataNote"] = f"الأسعار ({src}) مصحّحة بفرق الذهب الفوري ({off:.1f}$) فتقارب شارتك بفرق صغير: اعتمد على المسافات."
+            cfg["dataNote"] = f"الأسعار من Yahoo (متأخرة 10–15 دقيقة) مصحّحة بفرق الذهب الفوري ({off:.1f}$): اعتمد على المسافات."
         else:
             cfg["dataNote"] = "الأسعار بلا تصحيح الآن (السوق مغلق)، وقد تزيد 15–28$ عن شارتك: اعتمد على المسافات."
     return run_engine(chart, main, P), chart[-1]["time"], P
@@ -223,6 +282,8 @@ def heartbeat_text(cfg, P):
     now = fmt_time(time.time(), tz)
     if m.get("mode") == "live":
         data = f"📡 البيانات لحظية ({m['src']}) — آخر شمعة مغلقة قبل {m['age']:.1f} دقيقة ✅"
+    elif m.get("mode") == "warming":
+        data = "⏳ البوت يبدأ للتو ويجمع الأسعار اللحظية (نحو 45 دقيقة)؛ مؤقتاً البيانات متأخرة 10–15 دقيقة"
     elif m.get("mode") == "degraded":
         data = "⚠️ المصدر اللحظي معطّل الآن؛ البيانات متأخرة 10–15 دقيقة (قد تتأخر الإشارات)"
     else:
@@ -257,11 +318,13 @@ def main():
     loop_min = float(args[args.index("--loop") + 1]) if "--loop" in args else 0
     deadline = time.time() + loop_min * 60
     sent = set(state["sent"])
+    PERSIST.update({int(b["time"]): b for b in state.get("spot", [])})
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
     errs = 0; last_chk = time.time()
     while True:
         try:
+            sample_spot(cfg.get("spotSym", "XAU"))
             evs, last_t, P = compute(cfg, state)
             errs = 0
             fresh = [e for e in evs if e["bar_time"] >= time.time() - max_age and ev_key(e) not in sent]
@@ -272,6 +335,7 @@ def main():
                     log(f"أُرسل: {e['kind']} {ev_key(e)}")
                     sent.add(ev_key(e))
             state["sent"] = list(sent)
+            state["spot"] = spot_bars(time.time())[-24:]                  # آخر ساعتين تقريباً (24 شمعة) لتبدأ التشغيلات التالية دافئة
             now = time.time(); meta = cfg.get("_meta", {})
             dirty = bool(fresh)
             # تنبيه عند تعطّل المصدر اللحظي أثناء السوق (مرة كل ساعة كحد أقصى)
@@ -300,7 +364,8 @@ def main():
                 log("وُجدت نسخة أحدث من الكود: إعادة التشغيل بها")
                 commit_state()
                 os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((deadline - time.time()) / 60, 1):.1f}"])
-        time.sleep(60)
+        for _ in range(3):                                   # عيّنة سعر فوري كل 20 ثانية لبناء الشموع اللحظية
+            time.sleep(20); sample_spot(cfg.get("spotSym", "XAU"))
 
 
 if __name__ == "__main__":
