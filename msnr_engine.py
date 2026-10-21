@@ -14,7 +14,7 @@ NAN = float("nan")
 DEFAULTS = dict(
     tfs={"W": True, "D": True, "4H": True, "1H": True}, story=True,
     classicMode=0,                        # 0 = Line chart pivot، 1 = Strict
-    kClassic=True, kGap=False, kFlip=True, kQML=True, kOCL=False,
+    kClassic=True, kGap=False, kFlip=True, kQML=True, breakCl=2,
     minStars=1, liqPips=30.0, keepT=False,
     nPer=1, mergeGap=20.0, minAge=0, maxDist=500.0, pipSize=0.1,
 )
@@ -62,7 +62,7 @@ def eng(bars, cur, P):
     """bars: شموع الفريم المكتملة (الأخيرة قد تكون الشمعة المتكوّنة حالياً وتُعامل كشمعة متكوّنة).
     ترجع {"above": [...], "below": [...]} مستويات مختارة، كل مستوى dict(p, role, kd, tc, stc, origin)."""
     P = {**DEFAULTS, **P}
-    pipS = P["pipSize"]; liq = P["liqPips"]; keepI = 1 if P["keepT"] else 0; cMode = P["classicMode"]
+    pipS = P["pipSize"]; liq = P["liqPips"]; keepI = 1 if P["keepT"] else 0; cMode = P["classicMode"]; cfm = int(P["breakCl"])
     lv = []                               # كل مستوى: p r kd tm bk og ob ts pd lb ac op br lq
     lastSH = lastSL = NAN
     N = len(bars)
@@ -88,7 +88,7 @@ def eng(bars, cur, P):
                         if beyond:
                             if nb < 2:
                                 L["r"] = -r; L["kd"] = 3 if nb == 0 else 4; L["bk"] = nb + 1; L["tm"] = t1
-                                L["ts"] = 0; L["ac"] = 1; L["br"] = 1; L["lq"] = 0
+                                L["ts"] = 0; L["ac"] = 1; L["br"] = 1; L["lq"] = 0; L["wt"] = 0
                             else:
                                 gone = True
                         elif keepI == 0:
@@ -98,7 +98,13 @@ def eng(bars, cur, P):
                     else:
                         touched = (l1 <= p) if r == 1 else (h1 >= p)
                         if touched:
-                            if beyond:
+                            if beyond and cfm == 1:                       # إغلاق واحد يكفي للكسر
+                                if nb < 2:
+                                    L["r"] = -r; L["kd"] = 3 if nb == 0 else 4; L["bk"] = nb + 1; L["tm"] = t1
+                                    L["ts"] = 0; L["ac"] = 1; L["br"] = 1; L["lq"] = 0; L["wt"] = 0
+                                else:
+                                    gone = True
+                            elif beyond:
                                 L["pd"] = 1
                             elif keepI == 0:
                                 gone = True
@@ -108,6 +114,8 @@ def eng(bars, cur, P):
                             nearFail = (l1 > p and l1 - p <= liq * pipS) if r == 1 else (h1 < p and p - h1 <= liq * pipS)
                             if nearFail:
                                 L["lq"] += 1
+                                dw = (l1 - p) if r == 1 else (p - h1)            # بُعد الذيل عن المستوى (السيولة المخفية)
+                                L["wt"] = dw if L["wt"] == 0 else min(L["wt"], dw)
                             ox = L["op"]
                             if L["br"] == 0 and not isnan(ox) and ((c1 > ox) if r == 1 else (c1 < ox)):
                                 L["br"] = 1
@@ -134,10 +142,6 @@ def eng(bars, cur, P):
                 lp, role, kind, ot = c2, -1, 1, t2
             elif cV:
                 lp, role, kind, ot = c2, 1, 1, t2
-            elif c3 > o3 and c1 < o1 and l2 >= l3 and l1 < l3:
-                lp, role, kind, ot = c3, -1, 5, t3
-            elif c3 < o3 and c1 > o1 and h2 <= h3 and h1 > h3:
-                lp, role, kind, ot = c3, 1, 5, t3
             elif c2 > o2 and c1 > o1:
                 lp, role, kind, ot = c2, 1, 2, t2
             elif c2 < o2 and c1 < o1:
@@ -158,7 +162,7 @@ def eng(bars, cur, P):
                 else:
                     if not isnan(lastSL) and lastSL < c1:
                         oppP = lastSL
-                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0, lq=0))
+                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0, lq=0, wt=0))
                 if len(lv) > 60:
                     lv.pop(0)
 
@@ -182,7 +186,7 @@ def eng(bars, cur, P):
             if best >= 0:
                 used.add(best); L = lv[best]
                 stB = L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0)
-                res[key].append(dict(p=L["p"], role=L["r"], kd=L["kd"], tc=min(L["ts"], 9), stc=stB, origin=L["og"]))
+                res[key].append(dict(p=L["p"], role=L["r"], kd=L["kd"], tc=min(L["ts"], 9), stc=stB, origin=L["og"], hl=int(min(round(L["wt"] / pipS), 999))))
     return res
 
 
@@ -207,11 +211,11 @@ def story(bars4h, cur):
 
 
 # ───────────────────────── collect(): من كل الفريمات إلى قائمة مستويات نهائية ─────────────────────────
-KIND = {1: ("Classic V", "Classic A"), 2: ("Gap", "Gap"), 3: ("RBS", "SBR"), 4: ("QML", "QML"), 5: ("OCL", "OCL")}
+KIND = {1: ("Classic V", "Classic A"), 2: ("OC", "OC"), 3: ("RBS", "SBR"), 4: ("QML", "QML")}
 
 
 def kind_on(kd, P):
-    return {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"], 5: P["kOCL"]}[kd]
+    return {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}[kd]
 
 
 def htf_open(t_now, tf):
@@ -241,7 +245,7 @@ def collect(h1, chart5, cur, t_now, P):
             for s, L in enumerate(sel[key][:P["nPer"]]):
                 p = L["p"]; role = L["role"]
                 if kind_on(L["kd"], P) and (P["maxDist"] <= 0 or abs(cur - p) / pipS <= P["maxDist"]):
-                    used0 = any((b["low"] <= p) if role == 1 else (b["high"] >= p) for b in recent)
+                    used0 = any((b["low"] <= p) if role == 1 else (b["high"] >= p) for b in recent) or ((cur <= p) if role == 1 else (cur >= p))
                     if used0:
                         continue
                     hit = next((c for c in cl if abs(c["price"] - p) <= P["mergeGap"] * pipS), None)
@@ -249,7 +253,7 @@ def collect(h1, chart5, cur, t_now, P):
                         hit["tags"].append(tf)
                     else:
                         cl.append(dict(price=p, role="support" if role == 1 else "resistance", tags=[tf], kind=KIND[L["kd"]][0 if role == 1 else 1],
-                                       kd=L["kd"], stars=L["stc"], tests=L["tc"], rank=RANK[tf]))
+                                       kd=L["kd"], stars=L["stc"], tests=L["tc"], rank=RANK[tf], hl=L["hl"]))
     if P["story"]:
         b4 = aggregate(h1, "4H")
         if b4 and b4[-1]["time"] >= htf_open(t_now, "4H"):
@@ -257,6 +261,6 @@ def collect(h1, chart5, cur, t_now, P):
         tr, dec = story(b4, cur)
         if tr != 0 and not isnan(dec) and (P["maxDist"] <= 0 or abs(cur - dec) / pipS <= P["maxDist"]):
             cl.append(dict(price=dec, role="support" if dec < cur else "resistance", tags=["Story"], kind="Story " + ("Up" if tr == 1 else "Down") + " decision",
-                           kd=0, stars=0, tests=0, rank=0))
+                           kd=0, stars=0, tests=0, rank=0, hl=0))
     cl.sort(key=lambda c: -max(c["rank"], 0) if False else abs(c["price"] - cur))
     return cl

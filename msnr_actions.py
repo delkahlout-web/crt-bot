@@ -84,7 +84,8 @@ def level_text(c, cur):
     tf = "+".join(c["tags"])
     kind = c["kind"]
     tests = f" (اختُبر {c['tests']}x)" if c["tests"] else ""
-    return icon, side, f"{tf} · {kind} {stars}{tests}".strip(), d
+    hl = f" · 💧 سيولة مخفية {c['hl']} نقطة" if c.get("hl") else ""
+    return icon, side, f"{tf} · {kind} {stars}{tests}{hl}".strip(), d
 
 
 def snapshot_text(levels, cur, tz, P):
