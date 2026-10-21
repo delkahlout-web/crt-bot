@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "alertPts": 50,
+  "rearmPts": 100,
+  "cooldownMin": 30,
+  "maxAlertsPerDay": 15,
+  "snapshotHours": 24,
+  "engine": {
+    "tfs": {"W": true, "D": true, "4H": true, "1H": true},
+    "story": true,
+    "classicMode": 0,
+    "kClassic": true, "kGap": false, "kFlip": true, "kQML": true, "kOCL": false,
+    "minStars": 1, "liqPips": 30, "keepT": false,
+    "nPer": 1, "mergeGap": 20, "minAge": 0, "maxDist": 500, "pipSize": 0.1
+  }
+}

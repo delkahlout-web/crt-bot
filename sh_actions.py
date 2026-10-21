@@ -71,6 +71,8 @@ def commit_state():
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
         run("git", "config", "user.name", "sh-bot"); run("git", "config", "user.email", "sh-bot@users.noreply.github.com")
         run("git", "add", "sh_state.json")
+        if os.path.exists(os.path.join(HERE, "msnr_state.json")):
+            run("git", "add", "msnr_state.json")
         if run("git", "diff", "--cached", "--quiet").returncode == 0:
             return
         run("git", "commit", "-m", "sh state")
@@ -230,11 +232,11 @@ def compute(cfg, state):
     now = time.time()
     chart = yf_candles(cfg["ticker"], "5m", "30d", P["chartTF"])
     live, src, merged_ok = LIVE.get(cfg["ticker"]), "Yahoo", False
-    cfg["_meta"] = dict(mode="closed", src="Yahoo", age=None)
+    cfg["_meta"] = dict(mode="closed", src="Yahoo", age=None); cfg["_basis"] = None
     if P["chartTF"] == 5 and P["mainTF"] == 15:
         merged, s = merge_spot(chart, spot_bars(now), now)
         if s is not None:
-            chart = merged; merged_ok = True; src = "الذهب الفوري"
+            chart = merged; merged_ok = True; src = "الذهب الفوري"; cfg["_basis"] = s
             main = resample(chart, 15)
             age = (now - chart[-1]["time"] - 300) / 60
             cfg["_meta"] = dict(mode="live", src=src, age=age)
@@ -255,11 +257,12 @@ def compute(cfg, state):
         fresh = (now - (chart[-1]["time"] + 300)) <= 1500
         off = calc_offset(state, cfg.get("spotSym", "XAU"), live) if fresh else state.get("off")
         if off is not None:
-            state["off"] = off
+            state["off"] = off; cfg["_basis"] = off
             chart, main = shift(chart, off), shift(main, off)
             cfg["dataNote"] = f"الأسعار من Yahoo (متأخرة 10–15 دقيقة) مصحّحة بفرق الذهب الفوري ({off:.1f}$): اعتمد على المسافات."
         else:
             cfg["dataNote"] = "الأسعار بلا تصحيح الآن (السوق مغلق)، وقد تزيد 15–28$ عن شارتك: اعتمد على المسافات."
+    cfg["_chart5"] = chart
     return run_engine(chart, main, P), chart[-1]["time"], P
 
 
@@ -271,7 +274,7 @@ def code_changed():
         import subprocess
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
         run("git", "fetch", "-q", "origin", "main")
-        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py")
+        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_config.json")
         return bool(d.stdout.strip())
     except Exception:
         return False
@@ -319,6 +322,12 @@ def main():
     deadline = time.time() + loop_min * 60
     sent = set(state["sent"])
     PERSIST.update({int(b["time"]): b for b in state.get("spot", [])})
+    try:
+        import msnr_actions as MA
+        MS = MA.Msnr()
+    except Exception as ex:                                   # أي عطل في MSNR لا يمسّ إشارات SH
+        MS = None; log(f"MSNR معطّل: {ex}")
+    yh1 = {"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
     errs = 0; last_chk = time.time()
@@ -346,6 +355,17 @@ def main():
             if beat_every > 0 and now - state.get("beat", 0) >= beat_every:
                 if tg.send(heartbeat_text(cfg, P), silent=True):
                     state["beat"] = now; dirty = True
+            try:
+                if MS is not None:
+                    if time.time() - yh1["t"] > 600:                       # شموع Yahoo للساعة تُجلب كل 10 دقائق
+                        yh1["bars"] = yf_candles(cfg["ticker"], "1h", "60d", 60); yh1["t"] = time.time()
+                    ch5 = cfg.get("_chart5") or []
+                    cur = SPOT_BUF[-1][1] if SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 180 else (ch5[-1]["close"] if ch5 else None)
+                    if cur:
+                        if MS.tick(tg, ch5, cur, time.time(), yh1["bars"], cfg.get("_basis"), cfg.get("displayTz", "Asia/Hebron")) > 0:
+                            dirty = True
+            except Exception as ex:
+                log(f"MSNR خطأ: {ex}")
             save_state(state)
             if dirty:
                 commit_state()
