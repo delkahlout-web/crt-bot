@@ -4,7 +4,7 @@
   "rearmPts": 100,
   "cooldownMin": 30,
   "maxAlertsPerDay": 15,
-  "snapshotHours": 24,
+  "snapshotHours": 0,
   "engine": {
     "tfs": {"W": true, "D": true, "4H": true, "1H": true},
     "story": true,

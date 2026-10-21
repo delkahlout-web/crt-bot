@@ -141,7 +141,8 @@ class Msnr:
         if self.st.get("day") != day:
             self.st["day"] = day; self.st["dayN"] = 0
         # لقطة المستويات (أول مرة، ثم كل snapshotHours)
-        if now - self.st.get("snap", 0) >= self.cfg["snapshotHours"] * 3600:
+        hrs = self.cfg["snapshotHours"]                                  # 0 = مرة واحدة فقط (أول تشغيل)
+        if not self.st.get("snap") or (hrs > 0 and now - self.st["snap"] >= hrs * 3600):
             if tg.send(snapshot_text(lv, cur, tz, P), silent=bool(self.st.get("snap"))):
                 self.st["snap"] = now; sent += 1
         # تنبيهات الاقتراب

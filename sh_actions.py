@@ -353,7 +353,8 @@ def main():
                     state["warn"] = now; dirty = True
             # نبض: «البوت حيّ» كل ساعتين (صامت بلا صوت)
             if beat_every > 0 and now - state.get("beat", 0) >= beat_every:
-                if tg.send(heartbeat_text(cfg, P), silent=True):
+                # النبض يُسجَّل في الحالة (يراقبه الحارس)؛ وإرساله لتلجرام اختياري ومتوقف افتراضياً لأنه مزعج
+                if not cfg.get("heartbeatTelegram", False) or tg.send(heartbeat_text(cfg, P), silent=True):
                     state["beat"] = now; dirty = True
             try:
                 if MS is not None:
