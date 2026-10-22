@@ -39,8 +39,15 @@ def save_state(st):
     json.dump(st, open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
 
-def yf_candles(ticker, interval, period, minutes):
-    """شموع مكتملة فقط: قائمة dict(time=epoch UTC، open، high، low، close)."""
+_YC = {}          # تخزين مؤقت لشموع Yahoo (مفتاح: الرمز/الفريم/المدة)
+LAST_MODE = {"m": "closed"}
+
+
+def yf_candles(ticker, interval, period, minutes, ttl=0):
+    """شموع مكتملة فقط: قائمة dict(time=epoch UTC، open، high، low، close). ttl>0: يعيد المخزّن إن كان أحدث من ttl ثانية."""
+    key = (ticker, interval, period)
+    if ttl and key in _YC and time.time() - _YC[key][0] < ttl:
+        return [b for b in _YC[key][1] if b["time"] + minutes * 60 <= time.time()]
     last = None
     for attempt in range(4):
         try:
@@ -56,6 +63,7 @@ def yf_candles(ticker, interval, period, minutes):
             for t, o, h, l, c in zip(ts, d.Open.values, d.High.values, d.Low.values, d.Close.values):
                 if t + minutes * 60 <= now:
                     out.append(dict(time=int(t), open=float(o), high=float(h), low=float(l), close=float(c)))
+            _YC[key] = (time.time(), out)
             return out
         except Exception as ex:
             last = ex
@@ -135,6 +143,8 @@ def spot_bars(now):
         if end > now or len(g) < 3 or g[0][0] - st > 150 or end - g[-1][0] > 100:
             continue
         ps = [p for _, p in g]
+        if max(ps) - min(ps) < 0.005:                         # لا حركة طوال الشمعة = السوق مغلق (استراحة يومية/عطلة)
+            continue
         out.append(dict(time=st, open=ps[0], high=max(ps), low=min(ps), close=ps[-1]))
     have = {b["time"] for b in out}
     out += [b for t, b in PERSIST.items() if t not in have and t + 300 <= now and now - t < 8 * 3600]
@@ -143,9 +153,10 @@ def spot_bars(now):
 
 def merge_spot(yb, sb, now):
     """شموع الفوري (المبنية لحظياً والمحفوظة) تُعتمد كما هي لكامل نافذتها ولا تُستبدل لاحقاً بـ Yahoo (يمنع إعادة الرسم)؛
-    وقبل نافذتها يُستعمل تاريخ Yahoo (المكتمل منذ 20 دقيقة على الأقل) مُنزَّلاً بوسيط فرق الإغلاقات في التقاطع."""
+    وقبل نافذتها يُستعمل تاريخ Yahoo (المكتمل منذ 20 دقيقة على الأقل) مُنزَّلاً بوسيط فرق الإغلاقات في التقاطع.
+    لا يُشترط أن تكون شموع Yahoo حديثة: في الاستراحة اليومية (21:00–22:00 UTC صيفاً) والعطلة تتوقف بينما شموع الفوري المحفوظة تكفي للمواءمة."""
     ybv = [b for b in yb if b["time"] + 300 <= now - 1200]
-    if not ybv or not sb or now - (ybv[-1]["time"] + 300) > 3600:
+    if not ybv or not sb:
         return ybv, None
     sd = {b["time"]: b for b in sb}
     diffs = sorted(b["close"] - sd[b["time"]]["close"] for b in ybv[-96:] if b["time"] in sd)
@@ -155,13 +166,15 @@ def merge_spot(yb, sb, now):
     ymap = {b["time"]: b for b in ybv}
     out = []; prev = None
     for t in sorted(set(ymap) | set(sd)):
-        if prev is not None and t > prev + 300 and (t in sd or prev in sd):      # فجوة بجوار شموع الفوري
+        if prev is not None and t > prev + 300 and (t in sd or prev in sd):
             g = (t - prev) // 300 - 1
-            if g > 4:
-                return ybv, None
-            lc = out[-1]["close"]
-            for k in range(g):
-                out.append(dict(time=prev + 300 * (k + 1), open=lc, high=lc, low=lc, close=lc))
+            if prev > now - 1800:                                                 # فجوة حديثة (بدأت قبل أقل من 30 دقيقة): تُملأ إن كانت قصيرة
+                if g > 4:
+                    return ybv, None
+                lc = out[-1]["close"]
+                for k in range(g):
+                    out.append(dict(time=prev + 300 * (k + 1), open=lc, high=lc, low=lc, close=lc))
+            # فجوة أقدم = استراحة أو إغلاق سوق: تبقى فجوة طبيعية بلا شموع مسطحة
         out.append(sd[t] if t in sd else dict(ymap[t], open=ymap[t]["open"] - s_, high=ymap[t]["high"] - s_, low=ymap[t]["low"] - s_, close=ymap[t]["close"] - s_))
         prev = t
     if now - (out[-1]["time"] + 300) > 1500:                                      # لا شموع فوري حديثة ⇒ ليس وضعاً لحظياً
@@ -234,7 +247,7 @@ def params(cfg):
 def compute(cfg, state):
     P = params(cfg)
     now = time.time()
-    chart = yf_candles(cfg["ticker"], "5m", "30d", P["chartTF"])
+    chart = yf_candles(cfg["ticker"], "5m", "30d", P["chartTF"], ttl=(240 if LAST_MODE["m"] == "live" else 0))   # في الوضع اللحظي يُستعمل تاريخ Yahoo الأقدم من 20 دقيقة فقط
     live, src, merged_ok = LIVE.get(cfg["ticker"]), "Yahoo", False
     cfg["_meta"] = dict(mode="closed", src="Yahoo", age=None); cfg["_basis"] = None
     if P["chartTF"] == 5 and P["mainTF"] == 15:
@@ -340,10 +353,20 @@ def main():
         try:
             sample_spot(cfg.get("spotSym", "XAU"))
             evs, last_t, P = compute(cfg, state)
+            LAST_MODE["m"] = cfg.get("_meta", {}).get("mode", "closed")
             errs = 0
             now = time.time()
             trades = state.setdefault("trades", []); sigl = state.setdefault("sigs", [])
             sigs_now = [(int(a), int(b)) for a, b in sigl] + T.history_from_sent(sent)
+            # تبنّي صفقة أُرسلت إشارتها سابقاً (مثلاً بنسخة أقدم من البوت) ولم تنتهِ بعد، لتكتمل رسائل مصيرها
+            known = {(int(r["sig_time"]), int(r["dir"])) for r in trades}
+            closed_keys = {(int(e["trade"]["sig_time"]), int(e["trade"]["dir"])) for e in evs if e["kind"] == "closed"}
+            for e in evs:
+                if e["kind"] == "signal" and ev_key(e) in sent and e["bar_time"] >= now - 8 * 3600:
+                    kk = (int(e["trade"]["sig_time"]), int(e["trade"]["dir"]))
+                    if kk not in known and kk not in closed_keys and not any(r["dir"] == kk[1] and abs(int(r["sig_time"]) - kk[0]) <= T.DEDUP_SEC for r in trades):
+                        T.register(trades, sigl, e); sigl[-1] = list(sigl[-1]); known.add(kk)
+                        log(f"تبنّي صفقة مرسلة سابقاً لمتابعة مصيرها: {ev_key(e)}")
             fresh = [e for e in evs if e["kind"] == "signal" and e["bar_time"] >= now - max_age and ev_key(e) not in sent]
             log(f"{NAME} | آخر شمعة مغلقة: {dt.datetime.fromtimestamp(last_t, dt.timezone.utc):%Y-%m-%d %H:%M} UTC | إشارات جديدة: {len(fresh)} | صفقات متابَعة: {sum(1 for r in trades if not r['done'])}")
             for e in fresh:
@@ -377,7 +400,8 @@ def main():
             now = time.time(); meta = cfg.get("_meta", {})
             dirty = fresh_sent
             # تنبيه عند تعطّل المصدر اللحظي أثناء السوق (مرة كل ساعة كحد أقصى)
-            if meta.get("mode") == "degraded" and now - state.get("warn", 0) >= 3600:
+            state["degN"] = state.get("degN", 0) + 1 if meta.get("mode") == "degraded" else 0
+            if state["degN"] >= 5 and now - state.get("warn", 0) >= 3600:
                 if tg.send("⚠️ <b>تنبيه SH:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر الإشارات. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر."):
                     state["warn"] = now; dirty = True
             # نبض: «البوت حيّ» كل ساعتين (صامت بلا صوت)
@@ -406,7 +430,7 @@ def main():
             if errs >= 5 and time.time() - state.get("warn", 0) >= 3600:       # 5 أخطاء متتالية ≈ 5 دقائق
                 if tg.send(f"⚠️ <b>تنبيه SH:</b> البوت يواجه أخطاء متكررة منذ دقائق ولا يستطيع جلب الأسعار. سيعيد المحاولة تلقائياً.\nآخر خطأ: {str(ex)[:150]}"):
                     state["warn"] = time.time(); save_state(state)
-        if time.time() + 60 >= deadline:
+        if time.time() + 25 >= deadline:
             break
         # تحديث ذاتي: إن رُفعت نسخة أحدث من الكود، أعد التشغيل بها دون تدخل
         if time.time() - last_chk >= 300:
@@ -415,8 +439,7 @@ def main():
                 log("وُجدت نسخة أحدث من الكود: إعادة التشغيل بها")
                 commit_state()
                 os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((deadline - time.time()) / 60, 1):.1f}"])
-        for _ in range(3):                                   # عيّنة سعر فوري كل 20 ثانية لبناء الشموع اللحظية
-            time.sleep(20); sample_spot(cfg.get("spotSym", "XAU"))
+        time.sleep(20); sample_spot(cfg.get("spotSym", "XAU"))   # دورة كل نحو 20 ثانية: عيّنة سعر فوري ثم فحص الإشارات (تأخير الاكتشاف ≤ نحو 25 ثانية)
 
 
 if __name__ == "__main__":
