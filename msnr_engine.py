@@ -12,13 +12,13 @@ NY = ZoneInfo("America/New_York")
 NAN = float("nan")
 
 DEFAULTS = dict(
-    tfs={"W": True, "D": True, "4H": True, "1H": True}, story=True,
+    tfs={"W": True, "D": True, "4H": True, "1H": True, "30M": True, "15M": False}, story=True, confOnly=False,
     classicMode=0,                        # 0 = Line chart pivot، 1 = Strict
     kClassic=True, kGap=False, kFlip=True, kQML=True, breakCl=2,
     minStars=1, liqPips=30.0, keepT=False,
     nPer=1, mergeGap=20.0, minAge=0, maxDist=500.0, pipSize=0.1,
 )
-RANK = {"W": 4, "D": 3, "4H": 2, "1H": 1}
+RANK = {"W": 4, "D": 3, "4H": 2, "1H": 1, "30M": 0, "15M": 0}
 
 
 def isnan(x):
@@ -220,6 +220,10 @@ def kind_on(kd, P):
 
 def htf_open(t_now, tf):
     """وقت فتح الشمعة الكبيرة الحالية (epoch UTC) = أول ساعة تنتمي لنفس مفتاح الشمعة."""
+    if tf == "30M":
+        return int(t_now) // 1800 * 1800
+    if tf == "15M":
+        return int(t_now) // 900 * 900
     h = int(t_now) // 3600 * 3600
     k = _key(h, tf)
     while _key(h - 3600, tf) == k:
@@ -227,15 +231,25 @@ def htf_open(t_now, tf):
     return h
 
 
-def collect(h1, chart5, cur, t_now, P):
-    """h1: شموع ساعة (آخرها قد تكون الحالية)؛ chart5: شموع الشارت 5 دقائق (للتحقق من «المستخدَم»).
-    ترجع قائمة مستويات مرتبة بالأهمية: dict(price, role('support'|'resistance'), tags, kind, stars, tests, tfs)."""
+def collect(stores, chart5, cur, t_now, P):
+    """stores: dict(h1=[...], m30=[...], m15=[...]) أو قائمة شموع ساعة فقط؛ chart5: شموع الشارت 5 دقائق (للتحقق من «المستخدَم»).
+    ترجع قائمة مستويات مرتبة بالقرب: dict(price, role('support'|'resistance'), tags, kind, stars, tests, hl)."""
     P = {**DEFAULTS, **P}
-    cl = [] ; pipS = P["pipSize"]
-    for tf in ("W", "D", "4H", "1H"):
+    if isinstance(stores, list):
+        stores = dict(h1=stores)
+    h1 = stores.get("h1") or []
+    cl = []; pipS = P["pipSize"]
+    for tf in ("W", "D", "4H", "1H", "30M", "15M"):
         if not P["tfs"].get(tf, False):
             continue
-        bars = aggregate(h1, tf)
+        if tf == "30M":
+            bars = list(stores.get("m30") or [])
+        elif tf == "15M":
+            bars = list(stores.get("m15") or [])
+        else:
+            bars = aggregate(h1, tf)
+        if not bars:
+            continue
         t0 = htf_open(t_now, tf)
         if bars and bars[-1]["time"] >= t0:                    # الشمعة الحالية المتكوّنة ليست «مكتملة» للمحرك
             bars = bars[:-1]
@@ -262,5 +276,7 @@ def collect(h1, chart5, cur, t_now, P):
         if tr != 0 and not isnan(dec) and (P["maxDist"] <= 0 or abs(cur - dec) / pipS <= P["maxDist"]):
             cl.append(dict(price=dec, role="support" if dec < cur else "resistance", tags=["Story"], kind="Story " + ("Up" if tr == 1 else "Down") + " decision",
                            kd=0, stars=0, tests=0, rank=0, hl=0))
-    cl.sort(key=lambda c: -max(c["rank"], 0) if False else abs(c["price"] - cur))
+    if P["confOnly"]:
+        cl = [c for c in cl if len(c["tags"]) > 1 or c["tags"] == ["Story"]]
+    cl.sort(key=lambda c: abs(c["price"] - cur))
     return cl

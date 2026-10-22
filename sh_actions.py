@@ -16,6 +16,7 @@ import yfinance as yf
 from sh_engine import run_engine, DEFAULTS
 from sh_messages import message, ev_key, NAME, fmt_time
 import crt_bot as core                      # Telegram فقط
+import sh_track as T
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "sh_state.json")
@@ -136,33 +137,36 @@ def spot_bars(now):
         ps = [p for _, p in g]
         out.append(dict(time=st, open=ps[0], high=max(ps), low=min(ps), close=ps[-1]))
     have = {b["time"] for b in out}
-    out += [b for t, b in PERSIST.items() if t not in have and t + 300 <= now and now - t < 3 * 3600]
+    out += [b for t, b in PERSIST.items() if t not in have and t + 300 <= now and now - t < 8 * 3600]
     return sorted(out, key=lambda b: b["time"])
 
 
 def merge_spot(yb, sb, now):
-    """تاريخ Yahoo (يُحذف آخر 20 دقيقة منه لأنها قد تكون ناقصة) مُنزَّل إلى مستوى الذهب الفوري بوسيط فرق الإغلاقات في التقاطع، ثم تُلصق شموع الفوري."""
-    yb = [b for b in yb if b["time"] + 300 <= now - 1200]
-    if not yb or not sb or now - (yb[-1]["time"] + 300) > 3600:
-        return yb, None
+    """شموع الفوري (المبنية لحظياً والمحفوظة) تُعتمد كما هي لكامل نافذتها ولا تُستبدل لاحقاً بـ Yahoo (يمنع إعادة الرسم)؛
+    وقبل نافذتها يُستعمل تاريخ Yahoo (المكتمل منذ 20 دقيقة على الأقل) مُنزَّلاً بوسيط فرق الإغلاقات في التقاطع."""
+    ybv = [b for b in yb if b["time"] + 300 <= now - 1200]
+    if not ybv or not sb or now - (ybv[-1]["time"] + 300) > 3600:
+        return ybv, None
     sd = {b["time"]: b for b in sb}
-    diffs = sorted(b["close"] - sd[b["time"]]["close"] for b in yb[-48:] if b["time"] in sd)
+    diffs = sorted(b["close"] - sd[b["time"]]["close"] for b in ybv[-96:] if b["time"] in sd)
     if len(diffs) < 3:
-        return yb, None
-    s = diffs[len(diffs) // 2]
-    new = [b for b in sb if b["time"] > yb[-1]["time"]]
-    if not new or (new[0]["time"] - yb[-1]["time"]) // 300 > 5:
-        return yb, None
-    shifted = [dict(b, open=b["open"] - s, high=b["high"] - s, low=b["low"] - s, close=b["close"] - s) for b in yb]
-    filled = []; prev = yb[-1]["time"]; lc = yb[-1]["close"] - s; gaps = 0
-    for b in new:
-        t = prev + 300
-        while t < b["time"]:
-            filled.append(dict(time=t, open=lc, high=lc, low=lc, close=lc)); t += 300; gaps += 1
-        filled.append(b); prev = b["time"]; lc = b["close"]
-    if gaps > 4:
-        return yb, None
-    return shifted + filled, s
+        return ybv, None
+    s_ = diffs[len(diffs) // 2]
+    ymap = {b["time"]: b for b in ybv}
+    out = []; prev = None
+    for t in sorted(set(ymap) | set(sd)):
+        if prev is not None and t > prev + 300 and (t in sd or prev in sd):      # فجوة بجوار شموع الفوري
+            g = (t - prev) // 300 - 1
+            if g > 4:
+                return ybv, None
+            lc = out[-1]["close"]
+            for k in range(g):
+                out.append(dict(time=prev + 300 * (k + 1), open=lc, high=lc, low=lc, close=lc))
+        out.append(sd[t] if t in sd else dict(ymap[t], open=ymap[t]["open"] - s_, high=ymap[t]["high"] - s_, low=ymap[t]["low"] - s_, close=ymap[t]["close"] - s_))
+        prev = t
+    if now - (out[-1]["time"] + 300) > 1500:                                      # لا شموع فوري حديثة ⇒ ليس وضعاً لحظياً
+        return ybv, None
+    return out, s_
 
 
 def realtime_5m(now):
@@ -274,7 +278,7 @@ def code_changed():
         import subprocess
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
         run("git", "fetch", "-q", "origin", "main")
-        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_config.json")
+        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_config.json", "sh_track.py")
         return bool(d.stdout.strip())
     except Exception:
         return False
@@ -332,21 +336,46 @@ def main():
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
     errs = 0; last_chk = time.time()
     while True:
+        fresh_sent = False
         try:
             sample_spot(cfg.get("spotSym", "XAU"))
             evs, last_t, P = compute(cfg, state)
             errs = 0
-            fresh = [e for e in evs if e["bar_time"] >= time.time() - max_age and ev_key(e) not in sent]
-            log(f"{NAME} | آخر شمعة مغلقة: {dt.datetime.fromtimestamp(last_t, dt.timezone.utc):%Y-%m-%d %H:%M} UTC | أحداث جديدة: {len(fresh)}")
+            now = time.time()
+            trades = state.setdefault("trades", []); sigl = state.setdefault("sigs", [])
+            sigs_now = [(int(a), int(b)) for a, b in sigl] + T.history_from_sent(sent)
+            fresh = [e for e in evs if e["kind"] == "signal" and e["bar_time"] >= now - max_age and ev_key(e) not in sent]
+            log(f"{NAME} | آخر شمعة مغلقة: {dt.datetime.fromtimestamp(last_t, dt.timezone.utc):%Y-%m-%d %H:%M} UTC | إشارات جديدة: {len(fresh)} | صفقات متابَعة: {sum(1 for r in trades if not r['done'])}")
             for e in fresh:
+                active = [r for r in trades if not r["done"]]
+                if active or T.is_duplicate(sigs_now, active, e["trade"]):          # صفقة مفتوحة أو نفس الإشارة بتغيّر طفيف في البيانات
+                    sent.add(ev_key(e)); log(f"تجاهل إشارة مكرّرة/متزامنة: {ev_key(e)}"); continue
                 txt = message(e, cfg, P)
                 if txt and tg.send(txt):
                     log(f"أُرسل: {e['kind']} {ev_key(e)}")
-                    sent.add(ev_key(e))
+                    sent.add(ev_key(e)); T.register(trades, sigl, e); sigl[-1] = list(sigl[-1]); fresh_sent = True
+            # متابعة الصفقات المرسلة بشموعها (تعادل/هدف أول/إغلاق/تفعيل/إلغاء) بأرقامها المثبّتة لا بإعادة حساب المحرك
+            chart5 = cfg.get("_chart5") or []
+            for r in trades:
+                if not r["done"]:
+                    r["queue"].extend(T.advance(r, chart5, P))
+                keep = []
+                for e2 in r["queue"]:
+                    k2 = ev_key(e2)
+                    if k2 in sent or e2["bar_time"] < now - 3 * 3600:
+                        continue
+                    txt = message(e2, cfg, P)
+                    if txt and tg.send(txt):
+                        log(f"أُرسل: {e2['kind']} {k2}"); sent.add(k2); fresh_sent = True
+                    else:
+                        keep.append(e2)
+                r["queue"] = keep
+            state["trades"] = [r for r in trades if (not r["done"]) or r["queue"] or now - r["last"] < 6 * 3600]
+            state["sigs"] = [list(x) for x in sigl][-30:]
             state["sent"] = list(sent)
-            state["spot"] = spot_bars(time.time())[-24:]                  # آخر ساعتين تقريباً (24 شمعة) لتبدأ التشغيلات التالية دافئة
+            state["spot"] = spot_bars(time.time())[-96:]                  # آخر 8 ساعات (96 شمعة): تبدأ التشغيلات دافئة وتبقى الشموع مجمّدة
             now = time.time(); meta = cfg.get("_meta", {})
-            dirty = bool(fresh)
+            dirty = fresh_sent
             # تنبيه عند تعطّل المصدر اللحظي أثناء السوق (مرة كل ساعة كحد أقصى)
             if meta.get("mode") == "degraded" and now - state.get("warn", 0) >= 3600:
                 if tg.send("⚠️ <b>تنبيه SH:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر الإشارات. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر."):
@@ -358,8 +387,9 @@ def main():
                     state["beat"] = now; dirty = True
             try:
                 if MS is not None:
-                    if time.time() - yh1["t"] > 600:                       # شموع Yahoo للساعة تُجلب كل 10 دقائق
-                        yh1["bars"] = yf_candles(cfg["ticker"], "1h", "60d", 60); yh1["t"] = time.time()
+                    if time.time() - yh1["t"] > 600:                       # شموع Yahoo (1h/30m/15m) تُجلب كل 10 دقائق
+                        yh1["bars"] = {"h1": yf_candles(cfg["ticker"], "1h", "60d", 60), "m30": yf_candles(cfg["ticker"], "30m", "60d", 30), "m15": yf_candles(cfg["ticker"], "15m", "60d", 15)}
+                        yh1["t"] = time.time()
                     ch5 = cfg.get("_chart5") or []
                     cur = SPOT_BUF[-1][1] if SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 180 else (ch5[-1]["close"] if ch5 else None)
                     if cur:

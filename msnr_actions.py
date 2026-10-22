@@ -20,6 +20,7 @@ STATE_PATH = os.path.join(HERE, "msnr_state.json")
 CFG_PATH = os.path.join(HERE, "msnr_config.json")
 BANNER = "🟧 <b>MSNR Key Levels</b>"
 LINE = "━━━━━━━━━━━━━━"
+SAME_LEVEL = 1.2                       # مستويان بينهما أقل من هذا (دولار) = نفس المستوى (إزاحة الأسعار الطفيفة)
 
 DEF = dict(alertPts=50.0, rearmPts=100.0, cooldownMin=30, maxAlertsPerDay=15, snapshotHours=24, enabled=True,
            engine={})
@@ -42,37 +43,44 @@ def load_state():
             return json.load(open(STATE_PATH, encoding="utf-8"))
         except Exception:
             pass
-    return {"h1": [], "alerts": {}, "snap": 0, "day": "", "dayN": 0}
+    return {"h1": [], "m30": [], "m15": [], "alerts": {}, "snap": 0, "day": "", "dayN": 0}
 
 
 def save_state(st):
-    st["h1"] = st["h1"][-3000:]
+    st["h1"] = st["h1"][-3000:]; st["m30"] = st.get("m30", [])[-3000:]; st["m15"] = st.get("m15", [])[-3000:]
     json.dump(st, open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False)
 
 
-def load_seed():
-    if not os.path.exists(SEED_PATH):
-        return []
-    rows = json.loads(gzip.open(SEED_PATH, "rt", encoding="utf-8").read())
+def _rows(rows):
     return [dict(time=int(r[0]), open=r[1], high=r[2], low=r[3], close=r[4]) for r in rows]
 
 
-def build_h1(seed, st):
-    d = {b["time"]: b for b in seed}
-    for r in st["h1"]:
+def load_seed():
+    """يعيد dict(h1=[...], m30=[...], m15=[...]) — الملف قد يكون قائمة ساعات فقط (قديم) أو dict."""
+    if not os.path.exists(SEED_PATH):
+        return {"h1": [], "m30": [], "m15": []}
+    raw = json.loads(gzip.open(SEED_PATH, "rt", encoding="utf-8").read())
+    if isinstance(raw, list):
+        return {"h1": _rows(raw), "m30": [], "m15": []}
+    return {k: _rows(raw.get(k, [])) for k in ("h1", "m30", "m15")}
+
+
+def build_store(seed_rows, st_rows):
+    d = {b["time"]: b for b in seed_rows}
+    for r in st_rows:
         d.setdefault(int(r[0]), dict(time=int(r[0]), open=r[1], high=r[2], low=r[3], close=r[4]))
     return [d[k] for k in sorted(d)]
 
 
-def extend_h1(h1, st, yahoo_h1, basis, now):
-    """يضيف ساعات Yahoo المكتملة (مضى عليها 20 دقيقة على الأقل) الأحدث من آخر ساعة مخزّنة، بعد طرح الفرق (آجل − فوري)."""
-    if basis is None or not h1:
+def extend_store(bars, st_rows, yahoo_bars, basis, now, sec):
+    """يضيف شموع Yahoo المكتملة (مضى عليها 20 دقيقة على الأقل) الأحدث من آخر شمعة مخزّنة، بعد طرح الفرق (آجل − فوري)."""
+    if basis is None or not bars:
         return 0
-    last = h1[-1]["time"]; n = 0
-    for b in yahoo_h1:
-        if b["time"] > last and b["time"] + 3600 <= now - 1200:
+    last = bars[-1]["time"]; n = 0
+    for b in yahoo_bars:
+        if b["time"] > last and b["time"] + sec <= now - 1200:
             nb = dict(time=b["time"], open=b["open"] - basis, high=b["high"] - basis, low=b["low"] - basis, close=b["close"] - basis)
-            h1.append(nb); st["h1"].append([nb["time"], round(nb["open"], 2), round(nb["high"], 2), round(nb["low"], 2), round(nb["close"], 2)]); n += 1
+            bars.append(nb); st_rows.append([nb["time"], round(nb["open"], 2), round(nb["high"], 2), round(nb["low"], 2), round(nb["close"], 2)]); n += 1
     return n
 
 
@@ -117,15 +125,19 @@ class Msnr:
         self.cfg = load_cfg()
         self.seed = load_seed()
         self.st = load_state()
+        for k in ("m30", "m15"):
+            self.st.setdefault(k, [])
         self.cache = ([], 0)                      # (مستويات، وقت الحساب)
-        self.h1 = build_h1(self.seed, self.st)
-        log(f"جاهز: {len(self.h1)} ساعة (بذرة {len(self.seed)} + ممتدة {len(self.st['h1'])}) | إعداد: alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
+        self.h1 = build_store(self.seed["h1"], self.st["h1"])
+        self.m30 = build_store(self.seed["m30"], self.st["m30"])
+        self.m15 = build_store(self.seed["m15"], self.st["m15"])
+        log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} (بذرة + ممتدة) | إعداد: alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
 
     def levels(self, chart5, cur, now, force=False):
         if not force and now - self.cache[1] < 120:
             return self.cache[0]
         P = {**M.DEFAULTS, **self.cfg.get("engine", {})}
-        lv = M.collect(self.h1, chart5, cur, now, P)
+        lv = M.collect(dict(h1=self.h1, m30=self.m30, m15=self.m15), chart5, cur, now, P)
         self.cache = (lv, now)
         return lv
 
@@ -134,7 +146,10 @@ class Msnr:
         if not self.cfg.get("enabled", True) or not self.h1:
             return 0
         sent = 0
-        n = extend_h1(self.h1, self.st, yahoo_h1, basis, now)
+        yd = yahoo_h1 if isinstance(yahoo_h1, dict) else {"h1": yahoo_h1}
+        n = extend_store(self.h1, self.st["h1"], yd.get("h1", []), basis, now, 3600)
+        n += extend_store(self.m30, self.st["m30"], yd.get("m30", []), basis, now, 1800)
+        n += extend_store(self.m15, self.st["m15"], yd.get("m15", []), basis, now, 900)
         P = {**M.DEFAULTS, **self.cfg.get("engine", {})}
         lv = self.levels(chart5, cur, now, force=bool(n))
         day = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%d")
@@ -151,7 +166,7 @@ class Msnr:
         for k in [k for k, v in al.items() if now - v["t"] > 3 * 86400]:        # تنظيف قديم
             del al[k]
         for c in lv:
-            rec = next((v for v in al.values() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= 3.0), None)
+            rec = next((v for v in al.values() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= SAME_LEVEL), None)
             dist = abs(c["price"] - cur)
             if rec is not None and dist > rearm:
                 rec["armed"] = True                                               # ابتعد كفاية: يُسلَّح من جديد
@@ -165,7 +180,7 @@ class Msnr:
                 continue
             if tg.send(alert_text(c, cur, tz, P)):
                 key = f"{c['role']}|{c['price']:.1f}"
-                for k2 in [k2 for k2, v in al.items() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= 3.0]:
+                for k2 in [k2 for k2, v in al.items() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= SAME_LEVEL]:
                     del al[k2]
                 al[key] = dict(p=c["price"], role=c["role"], t=now, armed=False)
                 self.st["dayN"] += 1; sent += 1

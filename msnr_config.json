@@ -6,7 +6,8 @@
   "maxAlertsPerDay": 15,
   "snapshotHours": 0,
   "engine": {
-    "tfs": {"W": true, "D": true, "4H": true, "1H": true},
+    "tfs": {"W": true, "D": true, "4H": true, "1H": true, "30M": true, "15M": false},
+    "confOnly": false,
     "story": true,
     "classicMode": 0,
     "kClassic": true, "kGap": false, "kFlip": true, "kQML": true, "breakCl": 2,
