@@ -152,6 +152,8 @@ class Msnr:
             pro.step(b)
             out += pro.events
         pro.events = []
+        if S["muted"] and S["st"] in (2, 3):             # صفقة وُلدت أثناء إعادة البناء الصامتة ولم تُرسَل: تُهمل كي لا تحجب الصفقات الجديدة
+            S["st"] = 0
         return out
 
     def levels(self, chart5, cur, now, force=False):
