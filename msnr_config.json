@@ -7,7 +7,7 @@
   "snapshotHours": 0,
   "tradeAlerts": true,
   "stageAlerts": true,
-  "stageKinds": ["rej", "ret"],
+  "stageKinds": ["rej", "ret", "early"],
   "pro": {},
   "engine": {
     "tfs": {"W": true, "D": true, "4H": true, "1H": true, "30M": true, "15M": false},

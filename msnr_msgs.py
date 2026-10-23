@@ -40,6 +40,10 @@ def trade_text(e, tz, P):
 
 def stage_text(e, tz):
     from sh_messages import fmt_time
+    if e["kind"] == "early":
+        icon = "🟢" if e["sd"] == 1 else "🔴"
+        return (f"{BANNER}\n⚡ {icon} <b>لمس إعادة اختبار الآن</b> — {e['tag']} @ {e['p']:.2f}\n"
+                f"📍 السعر الآن: {e['cur']:.2f}\n<i>تنبيه فوري؛ يتأكد RET رسمياً عند إغلاق شمعة {e['cf']}.</i>\n🕒 {fmt_time(time.time(), tz)}")
     name = {"touch": "لمس", "rej": "رفض (REJ)", "ret": "إعادة اختبار (RET)", "bo": "كسر (BO)"}[e["kind"]]
     icon = "🟢" if e["sd"] == 1 else "🔴"
     return f"{BANNER}\n{icon} <b>{name}</b> — {e['tag']} @ {e['p']:.2f}\n🕒 {fmt_time(time.time(), tz)}"

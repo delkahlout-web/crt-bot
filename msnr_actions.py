@@ -132,6 +132,7 @@ class Msnr:
         self.m15 = build_store(self.seed["m15"], self.st["m15"])
         self.pro = MP.Pro(P=self.cfg.get("pro"), S=self.st.get("pro"))
         self.warmed = False
+        self.pro.warmed_ok = False
         log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} (بذرة + ممتدة) | Trader Pro | إعداد: alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
 
     def advance(self, chart5, now):
@@ -144,7 +145,7 @@ class Msnr:
             if not self.warmed:
                 if S["last"]:
                     pro.warm(S["last"])
-                self.warmed = True
+                self.warmed = True; pro.warmed_ok = True
         out = []
         for b in bars:
             pro.live = (not cold) or b["time"] >= now - 1800     # التشغيل البارد: تُبنى الحالة صامتة ثم تُرسل أحداث آخر 30 دقيقة فقط
@@ -174,8 +175,17 @@ class Msnr:
         for e in self.advance(chart5, now):
             if e["kind"] in ("plan", "fill", "cancel", "result") and self.cfg.get("tradeAlerts", True):
                 ob.append(dict(t=e["time"], text=MG.trade_text(e, tz, P)))
-            elif e["kind"] in self.cfg.get("stageKinds", ["rej", "ret"]) and self.cfg.get("stageAlerts", False):
+            elif e["kind"] in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.cfg.get("stageAlerts", False):
                 ob.append(dict(t=e["time"], text=MG.stage_text(e, tz)))
+        # تنبيه مبكر فوري: بعد REJ، حين يعود السعر الحي ويلمس المستوى (إعادة اختبار) نُرسل فوراً دون انتظار إغلاق شمعة التأكيد
+        if self.cfg.get("stageAlerts", False) and "early" in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.pro.warmed_ok:
+            tol = P["retTol"] * P["pipSize"]
+            for t in self.pro.S["tk"]:
+                if t["s"] == 2 and not t.get("e") and t["n"] <= P["retMax"]:
+                    p = t["p"]; sup = t["sd"] == 1
+                    if (sup and p - 2 * tol <= cur <= p + tol) or ((not sup) and p - tol <= cur <= p + 2 * tol):
+                        t["e"] = 1
+                        ob.append(dict(t=now, text=MG.stage_text(dict(kind="early", p=p, sd=t["sd"], tag=t["tg"], cur=cur, cf=MP.TFN[MP.cf_of(t["k"])]), tz)))
         keep = []
         for m in ob:
             if now - m["t"] > 3 * 3600:
