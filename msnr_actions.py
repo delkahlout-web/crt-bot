@@ -172,7 +172,7 @@ class Msnr:
         for e in self.advance(chart5, now):
             if e["kind"] in ("plan", "fill", "cancel", "result") and self.cfg.get("tradeAlerts", True):
                 ob.append(dict(t=e["time"], text=MG.trade_text(e, tz, P)))
-            elif e["kind"] in ("touch", "rej", "ret", "bo") and self.cfg.get("stageAlerts", False):
+            elif e["kind"] in self.cfg.get("stageKinds", ["rej", "ret"]) and self.cfg.get("stageAlerts", False):
                 ob.append(dict(t=e["time"], text=MG.stage_text(e, tz)))
         keep = []
         for m in ob:
