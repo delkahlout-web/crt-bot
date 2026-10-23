@@ -34,39 +34,55 @@ jobs:
         run: python sh_actions.py --test
 
   run:
+    if: github.event_name != 'workflow_dispatch' || !inputs.test
     runs-on: ubuntu-latest
     timeout-minutes: 355
-    concurrency:
-      group: sh-bot
-      cancel-in-progress: false
     steps:
+      # نسخة واحدة فقط تعمل: بدون concurrency (كان GitHub يلغي التشغيل الجاري كل ~35 دقيقة فتتأخر الإشارات حتى 20 دقيقة أثناء انتظار الطابور).
+      # تشغيل جدولة يخرج فوراً إن وُجد تشغيل أقدم جارٍ؛ وتشغيل «التسليم» (workflow_dispatch) ينتظر انتهاء القديم حتى 12 دقيقة.
+      - name: Single instance
+        id: lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          me=${{ github.run_id }}
+          for i in $(seq 1 24); do
+            others=$(gh run list --repo "${{ github.repository }}" --workflow sh.yml --status in_progress --json databaseId --jq "[.[] | select(.databaseId < $me)] | length")
+            if [ "$others" = "0" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+            if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then break; fi
+            sleep 30
+          done
+          echo "go=false" >> "$GITHUB_OUTPUT"
+          echo "تشغيل آخر يعمل: خروج"
+
       - uses: actions/checkout@v4
+        if: steps.lock.outputs.go == 'true'
 
       - uses: actions/setup-python@v5
+        if: steps.lock.outputs.go == 'true'
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install
+        if: steps.lock.outputs.go == 'true'
         run: pip install -r requirements.txt
 
-      # يشغّل التشغيل التالي مسبقاً (ينتظر في الطابور حتى ينتهي هذا) فلا يتوقف البوت لو أخّر GitHub الجدولة
-      - name: Queue next run
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run sh.yml --repo "${{ github.repository }}" -f test=false || true
-
       - name: Run SH bot
+        if: steps.lock.outputs.go == 'true'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           PYTHONIOENCODING: utf-8
         run: python sh_actions.py --loop 340
 
       - name: Save state
-        if: always()
+        if: always() && steps.lock.outputs.go == 'true'
         run: |
           git config user.name "sh-bot"
           git config user.email "sh-bot@users.noreply.github.com"
           git add sh_state.json
+          [ -f msnr_state.json ] && git add msnr_state.json || true
           git diff --cached --quiet || (git commit -m "sh state" && git pull --rebase -q && git push)
