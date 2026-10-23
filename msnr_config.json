@@ -5,6 +5,9 @@
   "cooldownMin": 30,
   "maxAlertsPerDay": 15,
   "snapshotHours": 0,
+  "tradeAlerts": true,
+  "stageAlerts": false,
+  "pro": {},
   "engine": {
     "tfs": {"W": true, "D": true, "4H": true, "1H": true, "30M": true, "15M": false},
     "confOnly": false,

@@ -13,6 +13,8 @@ import time
 from zoneinfo import ZoneInfo
 
 import msnr_engine as M
+import msnr_pro as MP
+import msnr_msgs as MG
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SEED_PATH = os.path.join(HERE, "msnr_seed.json.gz")
@@ -23,7 +25,7 @@ LINE = "━━━━━━━━━━━━━━"
 SAME_LEVEL = 1.2                       # مستويان بينهما أقل من هذا (دولار) = نفس المستوى (إزاحة الأسعار الطفيفة)
 
 DEF = dict(alertPts=50.0, rearmPts=100.0, cooldownMin=30, maxAlertsPerDay=15, snapshotHours=24, enabled=True,
-           engine={})
+           engine={}, pro={}, tradeAlerts=True, stageAlerts=False)
 
 
 def log(msg):
@@ -88,12 +90,10 @@ def level_text(c, cur):
     d = c["price"] - cur
     side = "مستوى بيع (مقاومة)" if c["role"] == "resistance" else "مستوى شراء (دعم)"
     icon = "🔴" if c["role"] == "resistance" else "🟢"
-    stars = ("★" * c["stars"]) if c["stars"] else ""
     tf = "+".join(c["tags"])
-    kind = c["kind"]
-    tests = f" (اختُبر {c['tests']}x)" if c["tests"] else ""
-    hl = f" · 💧 سيولة مخفية {c['hl']} نقطة" if c.get("hl") else ""
-    return icon, side, f"{tf} · {kind} {stars}{tests}{hl}".strip(), d
+    mk = c.get("marks", "")
+    extra = (" ★ قوي" if "★" in mk else "") + ((f" · 💧 سيولة مخفية {c['hl']} نقطة" if c.get("hl") else " · 💧 سيولة") if "$" in mk else "") + (" · ✓ مؤكَّد بفريم أعلى" if "✓" in mk else "")
+    return icon, side, f"{tf}{extra}".strip(), d
 
 
 def snapshot_text(levels, cur, tz, P):
@@ -127,19 +127,35 @@ class Msnr:
         self.st = load_state()
         for k in ("m30", "m15"):
             self.st.setdefault(k, [])
-        self.cache = ([], 0)                      # (مستويات، وقت الحساب)
         self.h1 = build_store(self.seed["h1"], self.st["h1"])
         self.m30 = build_store(self.seed["m30"], self.st["m30"])
         self.m15 = build_store(self.seed["m15"], self.st["m15"])
-        log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} (بذرة + ممتدة) | إعداد: alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
+        self.pro = MP.Pro(P=self.cfg.get("pro"), S=self.st.get("pro"))
+        self.warmed = False
+        log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} (بذرة + ممتدة) | Trader Pro | إعداد: alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
+
+    def advance(self, chart5, now):
+        """يعالج شموع الشارت 5د المغلقة الجديدة بآلة Trader Pro ويعيد أحداثها."""
+        pro = self.pro; S = pro.S
+        cold = not S["last"]
+        bars = [b for b in chart5 if b["time"] > S["last"] and b["time"] + 300 <= now]
+        if not self.warmed or bars:
+            pro.set_candles(self.h1, self.m30, self.m15, chart5)
+            if not self.warmed:
+                if S["last"]:
+                    pro.warm(S["last"])
+                self.warmed = True
+        out = []
+        for b in bars:
+            pro.live = (not cold) or b["time"] >= now - 1800     # التشغيل البارد: تُبنى الحالة صامتة ثم تُرسل أحداث آخر 30 دقيقة فقط
+            pro.events = []
+            pro.step(b)
+            out += pro.events
+        pro.events = []
+        return out
 
     def levels(self, chart5, cur, now, force=False):
-        if not force and now - self.cache[1] < 120:
-            return self.cache[0]
-        P = {**M.DEFAULTS, **self.cfg.get("engine", {})}
-        lv = M.collect(dict(h1=self.h1, m30=self.m30, m15=self.m15), chart5, cur, now, P)
-        self.cache = (lv, now)
-        return lv
+        return self.pro.shown(cur)
 
     def tick(self, tg, chart5, cur, now, yahoo_h1, basis, tz):
         """يُستدعى كل دقيقة. يعيد عدد الرسائل المرسلة. لا يرفع استثناءً لخارج (يُسجَّل فقط)."""
@@ -150,8 +166,25 @@ class Msnr:
         n = extend_store(self.h1, self.st["h1"], yd.get("h1", []), basis, now, 3600)
         n += extend_store(self.m30, self.st["m30"], yd.get("m30", []), basis, now, 1800)
         n += extend_store(self.m15, self.st["m15"], yd.get("m15", []), basis, now, 900)
-        P = {**M.DEFAULTS, **self.cfg.get("engine", {})}
-        lv = self.levels(chart5, cur, now, force=bool(n))
+        P = self.pro.P
+        # آلة Trader Pro: شموع الشارت المغلقة الجديدة ← أحداث (صفقات/مراحل) ← صندوق صادر يُعاد إرساله عند فشل تلجرام
+        ob = self.st.setdefault("outbox", [])
+        for e in self.advance(chart5, now):
+            if e["kind"] in ("plan", "fill", "cancel", "result") and self.cfg.get("tradeAlerts", True):
+                ob.append(dict(t=e["time"], text=MG.trade_text(e, tz, P)))
+            elif e["kind"] in ("touch", "rej", "ret", "bo") and self.cfg.get("stageAlerts", False):
+                ob.append(dict(t=e["time"], text=MG.stage_text(e, tz)))
+        keep = []
+        for m in ob:
+            if now - m["t"] > 3 * 3600:
+                continue
+            if not keep and tg.send(m["text"]):
+                sent += 1; log("رسالة صفقة أُرسلت")
+            else:
+                keep.append(m)
+        self.st["outbox"] = keep[-20:]
+        self.st["pro"] = self.pro.S
+        lv = self.levels(chart5, cur, now)
         day = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%d")
         if self.st.get("day") != day:
             self.st["day"] = day; self.st["dayN"] = 0
@@ -166,6 +199,8 @@ class Msnr:
         for k in [k for k, v in al.items() if now - v["t"] > 3 * 86400]:        # تنظيف قديم
             del al[k]
         for c in lv:
+            if (c["role"] == "support") != (c["price"] < cur):          # مستوى تجاوزه السعر (مستخدَم) لا يُنبَّه عليه
+                continue
             rec = next((v for v in al.values() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= SAME_LEVEL), None)
             dist = abs(c["price"] - cur)
             if rec is not None and dist > rearm:
