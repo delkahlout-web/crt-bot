@@ -337,6 +337,7 @@ def main():
     # GitHub يؤخر الجدولة أحياناً 25–40 دقيقة، فكل تشغيل يفحص كل دقيقة لمدة --loop دقيقة ليغطي الفجوات
     loop_min = float(args[args.index("--loop") + 1]) if "--loop" in args else 0
     deadline = time.time() + loop_min * 60
+    handover = False
     sent = set(state["sent"])
     PERSIST.update({int(b["time"]): b for b in state.get("spot", [])})
     try:
@@ -430,6 +431,15 @@ def main():
             if errs >= 5 and time.time() - state.get("warn", 0) >= 3600:       # 5 أخطاء متتالية ≈ 5 دقائق
                 if tg.send(f"⚠️ <b>تنبيه SH:</b> البوت يواجه أخطاء متكررة منذ دقائق ولا يستطيع جلب الأسعار. سيعيد المحاولة تلقائياً.\nآخر خطأ: {str(ex)[:150]}"):
                     state["warn"] = time.time(); save_state(state)
+        if not handover and loop_min >= 30 and time.time() >= deadline - 420 and os.environ.get("GH_TOKEN"):
+            # تسليم بلا فجوة: قبل 7 دقائق من النهاية نُشغّل التشغيل التالي (ينتظر هو انتهاء هذا ثم يبدأ)
+            try:
+                import subprocess
+                r = subprocess.run(["gh", "workflow", "run", "sh.yml", "--repo", os.environ.get("GITHUB_REPOSITORY", ""), "-f", "test=false"], capture_output=True, text=True, timeout=60)
+                log(f"تسليم: تشغيل التالي ({'تم' if r.returncode == 0 else 'فشل: ' + r.stderr[:120]})")
+            except Exception as ex:
+                log(f"تسليم فشل: {ex}")
+            handover = True
         if time.time() + 25 >= deadline:
             break
         # تحديث ذاتي: إن رُفعت نسخة أحدث من الكود، أعد التشغيل بها دون تدخل
