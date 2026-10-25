@@ -354,10 +354,15 @@ def main():
         try:
             sample_spot(cfg.get("spotSym", "XAU"))
             evs, last_t, P = compute(cfg, state)
+            sh_on = cfg.get("shEnabled", True)
+            if not sh_on:
+                evs = []                                  # إشارات SH متوقفة بقرار المستخدم؛ MSNR يستمر
             LAST_MODE["m"] = cfg.get("_meta", {}).get("mode", "closed")
             errs = 0
             now = time.time()
             trades = state.setdefault("trades", []); sigl = state.setdefault("sigs", [])
+            if not sh_on:
+                trades.clear()
             sigs_now = [(int(a), int(b)) for a, b in sigl] + T.history_from_sent(sent)
             # تبنّي صفقة أُرسلت إشارتها سابقاً (مثلاً بنسخة أقدم من البوت) ولم تنتهِ بعد، لتكتمل رسائل مصيرها
             known = {(int(r["sig_time"]), int(r["dir"])) for r in trades}
@@ -402,7 +407,7 @@ def main():
             dirty = fresh_sent
             # تنبيه عند تعطّل المصدر اللحظي أثناء السوق (مرة كل ساعة كحد أقصى)
             state["degN"] = state.get("degN", 0) + 1 if meta.get("mode") == "degraded" else 0
-            if state["degN"] >= 5 and now - state.get("warn", 0) >= 3600:
+            if sh_on and state["degN"] >= 5 and now - state.get("warn", 0) >= 3600:
                 if tg.send("⚠️ <b>تنبيه SH:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر الإشارات. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر."):
                     state["warn"] = now; dirty = True
             # نبض: «البوت حيّ» كل ساعتين (صامت بلا صوت)
