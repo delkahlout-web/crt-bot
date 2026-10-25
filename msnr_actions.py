@@ -171,6 +171,7 @@ class Msnr:
         n += extend_store(self.m15, self.st["m15"], yd.get("m15", []), basis, now, 900)
         P = self.pro.P
         # آلة Trader Pro: شموع الشارت المغلقة الجديدة ← أحداث (صفقات/مراحل) ← صندوق صادر يُعاد إرساله عند فشل تلجرام
+        mkt = bool(chart5) and now - (chart5[-1]["time"] + 300) <= 1200          # السوق مفتوح: آخر شمعة 5د حديثة
         ob = self.st.setdefault("outbox", [])
         for e in self.advance(chart5, now):
             if e["kind"] in ("plan", "fill", "cancel", "result") and self.cfg.get("tradeAlerts", True):
@@ -178,7 +179,7 @@ class Msnr:
             elif e["kind"] in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.cfg.get("stageAlerts", False):
                 ob.append(dict(t=e["time"], text=MG.stage_text(e, tz)))
         # تنبيه مبكر فوري: بعد REJ، حين يعود السعر الحي ويلمس المستوى (إعادة اختبار) نُرسل فوراً دون انتظار إغلاق شمعة التأكيد
-        if self.cfg.get("stageAlerts", False) and "early" in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.pro.warmed_ok:
+        if mkt and self.cfg.get("stageAlerts", False) and "early" in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.pro.warmed_ok:
             tol = P["retTol"] * P["pipSize"]
             for t in self.pro.S["tk"]:
                 if t["s"] == 2 and not t.get("e") and t["n"] <= P["retMax"]:
@@ -196,6 +197,9 @@ class Msnr:
                 keep.append(m)
         self.st["outbox"] = keep[-20:]
         self.st["pro"] = self.pro.S
+        if not mkt:                                                              # السوق مغلق: لا لقطة ولا تنبيهات اقتراب بسعر قديم
+            save_state(self.st)
+            return sent
         lv = self.levels(chart5, cur, now)
         day = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%d")
         if self.st.get("day") != day:

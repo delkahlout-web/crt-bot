@@ -8,13 +8,24 @@ HOW = {"LIMIT": "أمر معلّق عند المستوى", "REFINED": "أمر م
        "50%": "أمر معلّق (50%)", "ENTRY HERE": "دخول بالسوق"}
 
 
+def when(e, tz):
+    """وقت الحدث نفسه (إغلاق شمعة الشارت) لا وقت الإرسال، مع تنبيه إن تأخر الإرسال."""
+    from sh_messages import fmt_time
+    now = time.time(); t = e.get("time")
+    if t is None:
+        return fmt_time(now, tz)
+    at = t + 300
+    late = now - at
+    return fmt_time(at, tz) + (f" (أُرسلت متأخرة {int(late // 60)} د)" if late > 150 else "")
+
+
 def trade_text(e, tz, P):
     from sh_messages import fmt_time
     pip = P["pipSize"]; buy = e["dir"] == 1
     side = "شراء 🟢" if buy else "بيع 🔴"
     entry, sl, tp = e["entry"], e["sl"], e["tp"]
     risk = abs(entry - sl); rew = abs(tp - entry)
-    tm = fmt_time(time.time(), tz)
+    tm = when(e, tz)
     if e["kind"] == "plan":
         how = HOW.get(e.get("how"), "أمر معلّق")
         life = "" if e.get("mkt") else f"\n⏳ يبقى الأمر حتى {P['orderWin']} شمعة 5د (نحو {P['orderWin'] * 5 // 60} ساعات) أو كسر المستوى بإغلاقين"
@@ -46,4 +57,4 @@ def stage_text(e, tz):
                 f"📍 السعر الآن: {e['cur']:.2f}\n<i>تنبيه فوري؛ يتأكد RET رسمياً عند إغلاق شمعة {e['cf']}.</i>\n🕒 {fmt_time(time.time(), tz)}")
     name = {"touch": "لمس", "rej": "رفض (REJ)", "ret": "إعادة اختبار (RET)", "bo": "كسر (BO)"}[e["kind"]]
     icon = "🟢" if e["sd"] == 1 else "🔴"
-    return f"{BANNER}\n{icon} <b>{name}</b> — {e['tag']} @ {e['p']:.2f}\n🕒 {fmt_time(time.time(), tz)}"
+    return f"{BANNER}\n{icon} <b>{name}</b> — {e['tag']} @ {e['p']:.2f}\n🕒 {when(e, tz)}"
