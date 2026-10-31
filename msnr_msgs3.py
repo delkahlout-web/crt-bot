@@ -32,13 +32,12 @@ def v3_text(e, tz, P):
         return (f"{head}↩️ <b>رفض مبدئي (فوري)</b>\n{base}\n📍 السعر الآن: {cur:.2f} (ابتعد {abs(cur - p):.2f}$ عن المستوى)\n"
                 f"<i>يتأكد الرفض رسمياً عند إغلاق شمعة {cf}.</i>\n{tm}")
     if k == "retE":
-        return (f"{head}🔁 <b>لمس إعادة اختبار الآن</b>\n{base}\n📍 السعر الآن: {cur:.2f}\n"
-                f"<i>يتأكد RET رسمياً عند إغلاق شمعة {cf}.</i>\n{tm}")
+        return f"{head}🔁 <b>إعادة اختبار المستوى الآن</b> (بعد رفض مؤكَّد)\n{base}\n📍 السعر الآن: {cur:.2f}\n{tm}"
     if k == "ret":
         return f"{head}✅ <b>إعادة اختبار مؤكَّدة (RET)</b>\n{base}\n📍 السعر الآن: {cur:.2f}\n{tm}"
     # رفض مؤكَّد
     x = e.get("x") or 0
-    lines = [f"{head}✅ <b>رفض مؤكَّد (REJ)</b>{' — بعد كسر وهمي' if e.get('fake') else ''}", base, f"📍 السعر الآن: {cur:.2f}"]
+    lines = [f"{head}✅ <b>رفض مؤكَّد (REJ)</b> — أُغلقت شمعة {cf} {'فوق' if sup else 'تحت'} المستوى", base, f"📍 السعر الآن: {cur:.2f}"]
     if x:
         lines += [LINE, f"🧭 <b>نوع الرفض T{x}</b>: {TYPE_TXT[x]}"]
         z = e.get("zone")

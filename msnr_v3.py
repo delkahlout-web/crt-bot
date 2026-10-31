@@ -20,7 +20,7 @@ DEF = dict(
     kClassic=True, kGap=False, kFlip=True, kQML=True, brkN=2, minStars=1, liqPips=30.0, keepT=False,
     nPer=1, mergeGap=20.0, minAge=0, maxDist=500.0, confOnly=False, pipSize=0.1,
     retestC=2, retLife=40, flipFromBreak=True, refineOn=True, refineMax=50.0, rejOn=True, farPts=30.0, strongPts=30.0, chkHide=True,
-    earlyRejPts=15.0, retTolPts=5.0, touchLive=True, msgMaxG=3, msgNear=150.0,
+    earlyRejPts=15.0, retTolPts=5.0, touchLive=True, msgMaxG=3, msgNear=150.0, msgTouch=False, earlyRej=False, dedupeH=3.0,
 )
 TYPE_TXT = {
     1: "ذيل ضعيف + إغلاق قريب: يُتوقَّع سحب سيولة قمة الذيل أولاً — لا تدخل فوراً، ابحث عن Refine عند/فوق الذيل",
@@ -356,13 +356,43 @@ class V3:
                     best = (dd, L["p"], self.tag_of(g, L["kd"], L["r"], 0))
         return None if best is None else (best[1], best[2])
 
+    def cluster_tag(self, x):
+        """وسوم كل المستويات المتتبَّعة عند نفس السعر (نفس الجهة) في رسالة واحدة، الأكبر فريماً أولاً."""
+        pip = self.P["pipSize"]; mg = self.P["mergeGap"] * pip
+        mem = sorted([y for y in self.S["st"] if y["r"] == x["r"] and abs(y["p"] - x["p"]) <= mg and y["g"] <= self.P["msgMaxG"] and y["s"] in (0, 1, 2, 3, 5)], key=lambda y: y["g"])
+        if x not in mem:
+            mem.append(x)
+        return " + ".join(self.tag_of(y["g"], y["kd"], y["r"], y["stc"]) for y in mem[:4])
+
+    def allowed(self, kind, x, at):
+        """رسالة واحدة لكل مرحلة لكل مستوى (ولو تكرر على أكثر من فريم): قرب ← رفض ← إعادة اختبار، ولا إعادة اختبار قبل رفض."""
+        P = self.P; sent = self.S.setdefault("sent", [])
+        stage = "ret" if kind in ("ret", "retE") else "rej" if kind in ("rej", "rejE") else "touch"
+        tol = P["mergeGap"] * P["pipSize"]; hh = P["dedupeH"] * 3600
+        self.S["sent"] = sent = [m for m in sent if at - m["t"] < 12 * 3600]
+        near = [m for m in sent if m["r"] == x["r"] and abs(m["p"] - x["p"]) <= tol]
+        if any(m["stage"] == stage and at - m["t"] < hh for m in near):
+            return False
+        if stage == "ret" and not any(m["stage"] == "rej" for m in near):
+            return False
+        if stage == "rej" and any(m["stage"] == "ret" and at - m["t"] < hh for m in near):
+            return False
+        sent.append(dict(r=x["r"], p=x["p"], stage=stage, t=at))
+        return True
+
     def ev(self, kind, x, T, at, cur, fake=False, live=False):
         if (not self.live and not live) or x["g"] > self.P["msgMaxG"]:        # الرسائل لمستويات 1H فما فوق افتراضياً (msgMaxG=4 يضيف 30M)
             return
+        if kind == "touch" and not self.P["msgTouch"]:
+            return
+        if kind == "ret" and x.get("e3"):                           # أُرسلت إعادة الاختبار لحظياً: لا رسالة ثانية
+            return
         if kind in ("rej", "ret") and not x.get("e1") and abs(cur - x["p"]) > self.P["msgNear"] * self.P["pipSize"]:
             return                                    # مستوى مقلوب بعيد عن السعر لم يُلمس فعلياً: لا رسالة (الحالة تتقدّم بصمت)
+        if not self.allowed(kind, x, at):
+            return
         z = self.zone(x)
-        self.events.append(dict(kind=kind, p=x["p"], role=x["r"], tag=self.tag_of(x["g"], x["kd"], x["r"], x["stc"]), g=x["g"], cf=CONFN[x["g"]], cur=cur,
+        self.events.append(dict(kind=kind, p=x["p"], role=x["r"], tag=self.cluster_tag(x), g=x["g"], cf=CONFN[x["g"]], cur=cur,
                                 x=x.get("x", 0), w=x.get("w"), c=x.get("c"), zone=z, mid=(None if z is None else (z[0] + z[1]) / 2), refine=self.refine_of(x),
                                 at=at, fake=fake, rt=x.get("rt"), af=x.get("af")))
 
@@ -376,25 +406,25 @@ class V3:
             sup = x["r"] == 1; p = x["p"]; msg = x["g"] <= P["msgMaxG"]
             if x["s"] == 0 and ((cur <= p) if sup else (cur >= p)):
                 x["s"] = 1; x["T"] = int(now) // 300 * 300; x["e1"] = 1
-                if msg:
+                if msg and P["msgTouch"] and self.allowed("touch", x, now):
                     out.append(self._lev("touch", x, now, cur))
             elif x["s"] == 1 and not x["e2"] and x["e1"]:
                 far = P["earlyRejPts"] * pip
                 if (sup and cur >= p + far) or ((not sup) and cur <= p - far):
                     x["e2"] = 1
-                    if msg:
+                    if msg and P["earlyRej"] and self.allowed("rejE", x, now):
                         out.append(self._lev("rejE", x, now, cur))
             elif x["s"] == 2 and not x["e3"] and x["n"] <= P["retestC"]:
                 tol = P["retTolPts"] * pip
                 if (sup and p - 2 * tol <= cur <= p + tol) or ((not sup) and p - tol <= cur <= p + 2 * tol):
                     x["e3"] = 1
-                    if msg:
+                    if msg and self.allowed("retE", x, now):
                         out.append(self._lev("retE", x, now, cur))
         return out
 
     def _lev(self, kind, x, now, cur):
         z = self.zone(x)
-        return dict(kind=kind, p=x["p"], role=x["r"], tag=self.tag_of(x["g"], x["kd"], x["r"], x["stc"]), g=x["g"], cf=CONFN[x["g"]], cur=cur,
+        return dict(kind=kind, p=x["p"], role=x["r"], tag=self.cluster_tag(x), g=x["g"], cf=CONFN[x["g"]], cur=cur,
                     x=x.get("x", 0), w=x.get("w"), c=x.get("c"), zone=z, mid=(None if z is None else (z[0] + z[1]) / 2), refine=self.refine_of(x),
                     at=now, fake=False, rt=x.get("rt"), af=x.get("af"), live=True)
 
