@@ -145,7 +145,7 @@ class Eng3:
                 if len(lv) > 60:
                     lv.pop(0)
 
-    def select(self, cur, P):
+    def select(self, cur, P, kf=True):
         """أقرب مستويات فوق السعر وتحته (حتى nPer لكل جهة) بعد مرشّح النوع والنجوم والعمر."""
         pip = P["pipSize"]; out = []
         kon = {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}
@@ -154,7 +154,7 @@ class Eng3:
             for _ in range(P["nPer"]):
                 best = -1; bd = 0.0
                 for i, L in enumerate(self.lv):
-                    if i in used or L["pd"] != 0 or self.n - L["ob"] < P["minAge"] or not kon[L["kd"]]:
+                    if i in used or L["pd"] != 0 or self.n - L["ob"] < P["minAge"] or (kf and not kon[L["kd"]]):
                         continue
                     if L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) < P["minStars"]:
                         continue

@@ -1,22 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-MSNR Key Levels — تنبيهات الاقتراب من المستويات (نظام ثالث منفصل عن CRT وSH، لكنه يعمل داخل نفس حلقة بوت SH).
-  • تاريخ الساعة: بذرة من MT5 (msnr_seed.json.gz، بجودة الذهب الفوري) + تمديد من Yahoo 1h بعد تصحيح الفرق (آجل − فوري) الحي.
-  • كل دقيقة: يحسب المستويات (W/D/4H/1H + Story) بمحرك msnr_engine ويقارنها بالسعر الحالي.
-  • عند اقتراب السعر من مستوى (alertPts) يرسل رسالة، ولا يكرّرها حتى يبتعد السعر (rearmPts) أو تمضي مدة التهدئة.
+MSNR — نظام موحَّد داخل حلقة بوت SH (منفصل عن CRT):
+  • مستويات MSNR Key Levels v4 (msnr_v4): قرب ← رفض مؤكَّد (نوع T1–T4 + منطقة الدخول) ← إعادة اختبار (لحظية عند لمس السعر الحي).
+  • صفقات «Session plan» (msnr_plan): عند فتح شمعة 4H، دخول عند إغلاق رفض على مستوى 30M (3 نجوم)، وقف 60 وهدف 120 نقطة.
+  • رسالة واحدة لكل مرحلة لكل مستوى (ولو تقاطع أكثر من فريم)، وكل شيء يُعالَج لحظة إغلاق شمعة 5 دقائق (بعد ثوانٍ لا بعد دورة كاملة).
+تاريخ الشموع: بذرة MT5 (msnr_seed.json.gz) + تمديد Yahoo، والشموع الأحدث تُبنى من سعر الذهب الفوري مباشرة (بلا تأخير Yahoo).
 """
 import datetime as dt
 import gzip
 import json
 import os
 import time
-from zoneinfo import ZoneInfo
 
-import msnr_engine as M
-import msnr_pro as MP
-import msnr_msgs as MG
-import msnr_v3 as V3M
 import msnr_msgs3 as MG3
+import msnr_plan as PL
+import msnr_v4 as V4M
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SEED_PATH = os.path.join(HERE, "msnr_seed.json.gz")
@@ -24,10 +22,10 @@ STATE_PATH = os.path.join(HERE, "msnr_state.json")
 CFG_PATH = os.path.join(HERE, "msnr_config.json")
 BANNER = "🟧 <b>MSNR Key Levels</b>"
 LINE = "━━━━━━━━━━━━━━"
-SAME_LEVEL = 1.2                       # مستويان بينهما أقل من هذا (دولار) = نفس المستوى (إزاحة الأسعار الطفيفة)
+SAME_LEVEL = 1.2                       # مستويان بينهما أقل من هذا (دولار) = نفس المستوى
 
-DEF = dict(alertPts=50.0, rearmPts=100.0, cooldownMin=30, maxAlertsPerDay=15, snapshotHours=24, enabled=True,
-           engine={}, pro={}, v3={}, tradeAlerts=True, stageAlerts=False, v3Alerts=True)
+DEF = dict(alertPts=50.0, rearmPts=100.0, cooldownMin=30, maxAlertsPerDay=15, snapshotHours=0, enabled=True,
+           v4={}, plan={}, levelAlerts=True, planAlerts=True)
 
 
 def log(msg):
@@ -52,7 +50,9 @@ def load_state():
 
 def save_state(st):
     st["h1"] = st["h1"][-3000:]; st["m30"] = st.get("m30", [])[-3000:]; st["m15"] = st.get("m15", [])[-3000:]
-    json.dump(st, open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+    tmp = STATE_PATH + ".tmp"
+    json.dump(st, open(tmp, "w", encoding="utf-8"), ensure_ascii=False)
+    os.replace(tmp, STATE_PATH)
 
 
 def _rows(rows):
@@ -92,15 +92,21 @@ def level_text(c, cur):
     d = c["price"] - cur
     side = "مستوى بيع (مقاومة)" if c["role"] == "resistance" else "مستوى شراء (دعم)"
     icon = "🔴" if c["role"] == "resistance" else "🟢"
-    tf = "+".join(c["tags"])
-    mk = c.get("marks", "")
-    extra = (" ★ قوي" if "★" in mk else "") + ((f" · 💧 سيولة مخفية {c['hl']} نقطة" if c.get("hl") else " · 💧 سيولة") if "$" in mk else "") + (" · ✓ مؤكَّد بفريم أعلى" if "✓" in mk else "")
-    return icon, side, f"{tf}{extra}".strip(), d
+    why = c.get("why", "")
+    parts = []
+    if "A" in why:
+        parts.append("A مفعَّل من مستوى سابق")
+    if "B" in why:
+        parts.append("B كسر آخر نقطة معاكسة")
+    if "L" in why:
+        parts.append(f"L سيولة مخفية {c['hl']} نقطة" if c.get("hl") else "L سيولة مخفية")
+    desc = f"{'+'.join(c['tags'])} · {c.get('kind', '')} {'★' * len(why)}".strip() + (f" ({' · '.join(parts)})" if parts else "") + (" ⚡" if c.get("af") else "")
+    return icon, side, desc, d
 
 
 def snapshot_text(levels, cur, tz, P):
     if not levels:
-        return f"{BANNER}\n📋 لا مستويات ضمن {P['maxDist']:g} نقطة من السعر الآن (المستويات المستخدَمة تُستبعد كما في المؤشر)."
+        return f"{BANNER}\n📋 لا مستويات ضمن {P['maxDist']:g} نقطة من السعر الآن."
     rows = []
     for c in levels:
         icon, side, desc, d = level_text(c, cur)
@@ -115,9 +121,8 @@ def alert_text(c, cur, tz, P):
     from sh_messages import fmt_time
     icon, side, desc, d = level_text(c, cur)
     pts = abs(d) / P["pipSize"]
-    above = d > 0
-    move = "يقترب من الأعلى" if above else "يقترب من الأسفل"
-    return (f"{BANNER}\n⚠️ <b>السعر قرب من {side}</b>\n{icon} المستوى: <b>{c['price']:.2f}</b>\n{LINE}\n"
+    move = "يقترب من الأعلى" if d > 0 else "يقترب من الأسفل"
+    return (f"{BANNER}\n⚠️ <b>قرب من {side}</b>\n{icon} المستوى: <b>{c['price']:.2f}</b>\n{LINE}\n"
             f"📍 السعر الآن: <b>{cur:.2f}</b> ({move})\n📏 المسافة: {abs(d):.2f}$ ({pts:.0f} نقطة)\n"
             f"🏷️ النوع: {desc}\n{LINE}\n🕒 {fmt_time(time.time(), tz)}")
 
@@ -132,164 +137,157 @@ class Msnr:
         self.h1 = build_store(self.seed["h1"], self.st["h1"])
         self.m30 = build_store(self.seed["m30"], self.st["m30"])
         self.m15 = build_store(self.seed["m15"], self.st["m15"])
-        self.pro = MP.Pro(P=self.cfg.get("pro"), S=self.st.get("pro"))
-        self.v3 = V3M.V3(P=self.cfg.get("v3"), S=self.st.get("v3"))
+        self.v4 = V4M.V4(P=self.cfg.get("v4"), S=self.st.get("v4"))
+        self.plan = PL.Plan(P=self.cfg.get("plan"), S=self.st.get("plan"))
         self.warmed = False
-        self.pro.warmed_ok = False
         self.dirty = False
-        log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} (بذرة + ممتدة) | Trader Pro | إعداد: alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
+        self.P = self.v4.P
+        log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} | مستويات v4 + خطة الجلسة | alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
 
-    def advance(self, chart5, now):
-        """يعالج شموع الشارت 5د المغلقة الجديدة بآلة Trader Pro ويعيد أحداثها."""
-        pro = self.pro; S = pro.S; v3 = self.v3; S3 = v3.S
-        cold = not S["last"]; cold3 = not S3["last"]
-        bars = [b for b in chart5 if b["time"] > S["last"] and b["time"] + 300 <= now]
-        bars3 = [b for b in chart5 if b["time"] > S3["last"] and b["time"] + 300 <= now]
-        if not self.warmed or bars or bars3:
-            pro.set_candles(self.h1, self.m30, self.m15, chart5)
-            v3.set_candles(self.h1, self.m30, self.m15, chart5)
-            if not self.warmed:
-                if S["last"]:
-                    pro.warm(S["last"])
-                if S3["last"]:
-                    v3.warm(S3["last"] + 300)
-                self.warmed = True; pro.warmed_ok = True
-        out = []
-        for b in bars:
-            pro.live = (not cold) or b["time"] >= now - 1800     # التشغيل البارد: تُبنى الحالة صامتة ثم تُرسل أحداث آخر 30 دقيقة فقط
-            pro.events = []
-            pro.step(b)
-            out += pro.events
-        pro.events = []
-        self.v3_events = []
-        for b in bars3:
-            v3.live = (not cold3) or b["time"] >= now - 1800
-            v3.events = []
-            v3.step(b)
-            self.v3_events += v3.events
-        v3.events = []
-        if S["muted"] and S["st"] in (2, 3):             # صفقة وُلدت أثناء إعادة البناء الصامتة ولم تُرسَل: تُهمل كي لا تحجب الصفقات الجديدة
-            S["st"] = 0
-        return out
+    # ───────────── إرسال ─────────────
+    def _send(self, tg, text, at):
+        if tg.send(text):
+            return 1
+        self.st.setdefault("outbox", []).append(dict(t=at, text=text))
+        return 0
 
-    def levels(self, chart5, cur, now, force=False):
-        return self.v3.shown(cur, now)
+    def _persist(self):
+        self.st["v4"] = self.v4.S; self.st["plan"] = self.plan.S
+        self.st["v4eng"] = self.v4.dump(); self.st["planeng"] = self.plan.dump()
+
+    # ───────────── معالجة الشموع ─────────────
+    def _prepare(self, chart5):
+        r4 = rp = False
+        if not self.warmed:                                   # استعادة حالة المحرّكات المحفوظة (وإلا إعادة بنائها من الشموع)
+            r4 = self.v4.restore(self.st.get("v4eng")) if self.v4.S["last"] else False
+            rp = self.plan.restore(self.st.get("planeng")) if self.plan.S["last"] else False
+        self.v4.set_candles(self.h1, self.m30, self.m15, chart5)
+        self.plan.set_candles(self.v4.cl[3], self.v4.cl[4], self.v4.cl[2], chart5)
+        if not self.warmed:
+            if self.v4.S["last"] and not r4:
+                self.v4.warm(self.v4.S["last"] + 300)
+            if self.plan.S["last"] and not rp:
+                self.plan.warm(self.plan.S["last"])
+            self.warmed = True
+
+    def _run_bars(self, chart5, now):
+        """يعالج شموع 5د المغلقة الجديدة في محرك المستويات وخطة الجلسة ويعيد (أحداث المستويات، أحداث الصفقات)."""
+        v4, plan = self.v4, self.plan
+        b4 = [b for b in chart5 if b["time"] > v4.S["last"] and b["time"] + 300 <= now]
+        bp = [b for b in chart5 if b["time"] > plan.S["last"] and b["time"] + 300 <= now]
+        if not self.warmed or b4 or bp:
+            self._prepare(chart5)
+        cold4 = not v4.S["last"]; coldp = not plan.S["last"]
+        ev4 = []; evp = []
+        for b in b4:
+            v4.live = (not cold4) or b["time"] >= now - 1800
+            v4.events = []; v4.step(b); ev4 += v4.events
+        v4.events = []
+        for b in bp:
+            plan.live = (not coldp) or b["time"] >= now - 900
+            plan.events = []; plan.step(b); evp += plan.events
+        plan.events = []
+        return ev4, evp
 
     def fast_bar(self, tg, bars, now, tz):
-        """عند إغلاق شمعة 5د مباشرة (بعد ثوانٍ لا بعد دورة الحساب الكاملة): يعالج الشمعة الجديدة في محرك v3 ويرسل REJ/RET المؤكَّدة فوراً."""
-        if not self.cfg.get("enabled", True) or not self.warmed or not self.cfg.get("v3Alerts", True):
+        """عند إغلاق شمعة 5د مباشرة (بعد ثوانٍ): يعالج الشمعة الجديدة ويرسل الرفض/إعادة الاختبار/الصفقة فوراً."""
+        if not self.cfg.get("enabled", True) or not self.warmed:
             return 0
-        v3 = self.v3; c5 = v3.chart5
-        last = max(c5[-1]["time"] if c5 else 0, v3.S["last"])
+        c5 = self.v4.chart5
+        last = max(c5[-1]["time"] if c5 else 0, self.v4.S["last"], self.plan.S["last"])
         new = [b for b in bars if b["time"] > last and b["time"] + 300 <= now]
         if not new:
             return 0
-        v3.set_candles(self.h1, self.m30, self.m15, list(c5) + new)
-        sent = 0
-        for b in new:
-            v3.live = True; v3.events = []
-            v3.step(b)
-            for e in v3.events:
-                if e["kind"] in ("touch", "rej", "ret"):
-                    txt = MG3.v3_text(e, tz, v3.P)
-                    if tg.send(txt):
-                        sent += 1
-                    else:
-                        self.st.setdefault("outbox", []).append(dict(t=e["at"], text=txt))
-                    log(f"شمعة مغلقة: {e['kind']} {e['tag']} @ {e['p']:.2f}")
-        v3.events = []
-        self.st["v3"] = v3.S
-        save_state(self.st)
+        chart5 = list(c5) + new
+        ev4, evp = self._run_bars(chart5, now)
+        sent = self._emit(tg, ev4, evp, tz, now)
+        self._persist(); save_state(self.st)
         if sent:
             self.dirty = True
         return sent
 
     def fast(self, tg, cur, now, tz):
-        """يُستدعى كل بضع ثوانٍ بالسعر الحي: لمس المستوى / رفض مبدئي / لمس إعادة اختبار — فوراً. يعيد عدد الرسائل المرسلة."""
-        if not self.cfg.get("enabled", True) or not self.warmed or not self.cfg.get("v3Alerts", True):
+        """السعر الحي (كل ~4 ثوانٍ): إعادة اختبار لحظية بعد رفض مؤكَّد + وقف/هدف الصفقة المفتوحة فوراً."""
+        if not self.cfg.get("enabled", True) or not self.warmed:
             return 0
-        mkt = bool(self.v3.chart5) and now - (self.v3.chart5[-1]["time"] + 300) <= 1200
-        if not mkt:
+        c5 = self.v4.chart5
+        if not (c5 and now - (c5[-1]["time"] + 300) <= 1200):
+            return 0                                   # السوق مغلق
+        ev4 = self.v4.fast(cur, now) if self.cfg.get("levelAlerts", True) else []
+        evp = self.plan.fast(cur, now) if self.cfg.get("planAlerts", True) else []
+        if not ev4 and not evp:
             return 0
-        sent = 0
-        for e in self.v3.fast(cur, now):
-            txt = MG3.v3_text(e, tz, self.v3.P)
-            if tg.send(txt):
-                sent += 1
-            else:
-                self.st.setdefault("outbox", []).append(dict(t=now, text=txt))
-            log(f"فوري: {e['kind']} {e['tag']} @ {e['p']:.2f} | السعر {cur:.2f}")
+        sent = self._emit(tg, ev4, evp, tz, now)
+        self._persist(); save_state(self.st)
         if sent:
-            self.st["v3"] = self.v3.S; self.st["pro"] = self.pro.S
-            save_state(self.st); self.dirty = True
+            self.dirty = True
         return sent
 
+    def _emit(self, tg, ev4, evp, tz, now):
+        sent = 0
+        if self.cfg.get("levelAlerts", True):
+            for e in ev4:
+                sent += self._send(tg, MG3.v4_text(e, tz, self.v4.P), e["at"])
+                log(f"{e['kind']} {e['tag']} @ {e['p']:.2f} | السعر {e['cur']:.2f}")
+        if self.cfg.get("planAlerts", True):
+            for e in evp:
+                sent += self._send(tg, MG3.plan_text(e, tz, self.plan.P), e["at"])
+                log(f"خطة الجلسة: {e['kind']} {e.get('res', '')} {'شراء' if e['dir'] == 1 else 'بيع'} @ {e['entry']:.2f}")
+        return sent
+
+    def levels(self, chart5, cur, now, force=False):
+        return self.v4.shown(cur, now)
+
+    # ───────────── الدورة الكاملة (~كل 20 ثانية) ─────────────
     def tick(self, tg, chart5, cur, now, yahoo_h1, basis, tz):
-        """يُستدعى كل دقيقة. يعيد عدد الرسائل المرسلة. لا يرفع استثناءً لخارج (يُسجَّل فقط)."""
+        """يعيد عدد الرسائل المرسلة. لا يرفع استثناءً لخارج الحلقة إلا لتعالجه (إصلاح ذاتي في sh_actions)."""
         if not self.cfg.get("enabled", True) or not self.h1:
             return 0
         sent = 0
         yd = yahoo_h1 if isinstance(yahoo_h1, dict) else {"h1": yahoo_h1}
-        n = extend_store(self.h1, self.st["h1"], yd.get("h1", []), basis, now, 3600)
-        n += extend_store(self.m30, self.st["m30"], yd.get("m30", []), basis, now, 1800)
-        n += extend_store(self.m15, self.st["m15"], yd.get("m15", []), basis, now, 900)
-        P = self.pro.P
-        # آلة Trader Pro: شموع الشارت المغلقة الجديدة ← أحداث (صفقات/مراحل) ← صندوق صادر يُعاد إرساله عند فشل تلجرام
+        extend_store(self.h1, self.st["h1"], yd.get("h1", []), basis, now, 3600)
+        extend_store(self.m30, self.st["m30"], yd.get("m30", []), basis, now, 1800)
+        extend_store(self.m15, self.st["m15"], yd.get("m15", []), basis, now, 900)
+        P = self.v4.P
         mkt = bool(chart5) and now - (chart5[-1]["time"] + 300) <= 1200          # السوق مفتوح: آخر شمعة 5د حديثة
-        ob = self.st.setdefault("outbox", [])
-        for e in self.advance(chart5, now):
-            if e["kind"] in ("plan", "fill", "cancel", "result") and self.cfg.get("tradeAlerts", True):
-                ob.append(dict(t=e["time"], text=MG.trade_text(e, tz, P)))
-            elif e["kind"] in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.cfg.get("stageAlerts", False):
-                ob.append(dict(t=e["time"], text=MG.stage_text(e, tz)))
-        if self.cfg.get("v3Alerts", True) and mkt:
-            for e in getattr(self, "v3_events", []):
-                if e["kind"] in ("touch", "rej", "ret"):
-                    ob.append(dict(t=e["at"], text=MG3.v3_text(e, tz, self.v3.P)))
-        # تنبيه مبكر فوري: بعد REJ، حين يعود السعر الحي ويلمس المستوى (إعادة اختبار) نُرسل فوراً دون انتظار إغلاق شمعة التأكيد
-        if mkt and self.cfg.get("stageAlerts", False) and "early" in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.pro.warmed_ok:
-            tol = P["retTol"] * P["pipSize"]
-            for t in self.pro.S["tk"]:
-                if t["s"] == 2 and not t.get("e") and t["n"] <= P["retMax"]:
-                    p = t["p"]; sup = t["sd"] == 1
-                    if (sup and p - 2 * tol <= cur <= p + tol) or ((not sup) and p - tol <= cur <= p + 2 * tol):
-                        t["e"] = 1
-                        ob.append(dict(t=now, text=MG.stage_text(dict(kind="early", p=p, sd=t["sd"], tag=t["tg"], cur=cur, cf=MP.TFN[MP.cf_of(t["k"])]), tz)))
+        ev4, evp = self._run_bars(chart5, now)
+        if not mkt:
+            ev4 = []; evp = []                                                    # لا رسائل بسعر قديم والسوق مغلق
+        sent += self._emit(tg, ev4, evp, tz, now)
+        # إعادة إرسال ما فشل (صندوق صادر) خلال 3 ساعات
         keep = []
-        for m in ob:
+        for m in self.st.setdefault("outbox", []):
             if now - m["t"] > 3 * 3600:
                 continue
             if not keep and tg.send(m["text"]):
-                sent += 1; log("رسالة صفقة أُرسلت")
+                sent += 1
             else:
                 keep.append(m)
         self.st["outbox"] = keep[-20:]
-        self.st["pro"] = self.pro.S
-        self.st["v3"] = self.v3.S
-        if not mkt:                                                              # السوق مغلق: لا لقطة ولا تنبيهات اقتراب بسعر قديم
+        self._persist()
+        if not mkt:
             save_state(self.st)
             return sent
         lv = self.levels(chart5, cur, now)
         day = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%d")
         if self.st.get("day") != day:
             self.st["day"] = day; self.st["dayN"] = 0
-        # لقطة المستويات (أول مرة، ثم كل snapshotHours)
-        hrs = self.cfg["snapshotHours"]                                  # 0 = مرة واحدة فقط (أول تشغيل)
-        if not self.st.get("snap") or (hrs > 0 and now - self.st["snap"] >= hrs * 3600):
+        hrs = self.cfg["snapshotHours"]                                           # 0 = مرة واحدة فقط (أول تشغيل)
+        if self.cfg.get("levelAlerts", True) and (not self.st.get("snap") or (hrs > 0 and now - self.st["snap"] >= hrs * 3600)):
             if tg.send(snapshot_text(lv, cur, tz, P), silent=bool(self.st.get("snap"))):
                 self.st["snap"] = now; sent += 1
-        # تنبيهات الاقتراب
+        # تنبيهات القرب: مرة لكل مستوى حتى يبتعد السعر (rearmPts) أو تمضي مدة التهدئة
         near = self.cfg["alertPts"] * P["pipSize"]; rearm = self.cfg["rearmPts"] * P["pipSize"]
         al = self.st["alerts"]
-        for k in [k for k, v in al.items() if now - v["t"] > 3 * 86400]:        # تنظيف قديم
+        for k in [k for k, v in al.items() if now - v["t"] > 3 * 86400]:
             del al[k]
-        for c in lv:
-            if (c["role"] == "support") != (c["price"] < cur):          # مستوى تجاوزه السعر (مستخدَم) لا يُنبَّه عليه
+        for c in lv if self.cfg.get("levelAlerts", True) else []:
+            if (c["role"] == "support") != (c["price"] < cur):                    # مستوى تجاوزه السعر لا يُنبَّه عليه
                 continue
             rec = next((v for v in al.values() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= SAME_LEVEL), None)
             dist = abs(c["price"] - cur)
             if rec is not None and dist > rearm:
-                rec["armed"] = True                                               # ابتعد كفاية: يُسلَّح من جديد
+                rec["armed"] = True
             if dist > near:
                 continue
             if rec is not None and not rec.get("armed") and now - rec["t"] < 6 * 3600:
@@ -304,6 +302,6 @@ class Msnr:
                     del al[k2]
                 al[key] = dict(p=c["price"], role=c["role"], t=now, armed=False)
                 self.st["dayN"] += 1; sent += 1
-                log(f"تنبيه: {c['role']} {c['price']:.2f} | السعر {cur:.2f}")
+                log(f"قرب: {c['role']} {c['price']:.2f} | السعر {cur:.2f}")
         save_state(self.st)
         return sent
