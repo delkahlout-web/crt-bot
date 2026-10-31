@@ -303,6 +303,10 @@ def compute(cfg, state):
     return run_engine(chart, main, P), chart[-1]["time"], P
 
 
+CODE_FILES = ["sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_pro.py", "msnr_msgs.py",
+              "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_config.json", "sh_track.py"]
+
+
 def code_changed():
     """هل على GitHub نسخة أحدث من ملفات البوت؟ (للتحديث الذاتي دون تدخل يدوي)"""
     if os.environ.get("GITHUB_ACTIONS") != "true":
@@ -311,9 +315,30 @@ def code_changed():
         import subprocess
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
         run("git", "fetch", "-q", "origin", "main")
-        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_pro.py", "msnr_msgs.py", "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_config.json", "sh_track.py")
+        d = run("git", "diff", "--name-only", "origin/main", "--", *CODE_FILES)          # الملفات الحالية على القرص مقابل GitHub
         return bool(d.stdout.strip())
     except Exception:
+        return False
+
+
+def apply_update():
+    """يجلب الكود الجديد فعلياً إلى القرص (سحب ثم نسخ احتياطي للملفات) ويتحقق أنه صار مطابقاً قبل إعادة التشغيل؛ يمنع حلقة إعادة تشغيل بلا تحديث."""
+    try:
+        import subprocess
+        run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=90)
+        r = run("git", "pull", "--rebase", "--autostash", "-q")
+        if r.returncode != 0:
+            run("git", "rebase", "--abort")
+            names = run("git", "diff", "--name-only", "origin/main", "--", *CODE_FILES).stdout.split()
+            if names:
+                run("git", "checkout", "origin/main", "--", *names)
+                run("git", "reset", "-q", "--", *names)
+        left = run("git", "diff", "--name-only", "origin/main", "--", *CODE_FILES).stdout.strip()
+        if left:
+            log(f"التحديث لم يكتمل: {left.replace(chr(10), ' ')}")
+        return not left
+    except Exception as ex:
+        log(f"تعذّر تطبيق التحديث: {ex}")
         return False
 
 
@@ -484,9 +509,13 @@ def main():
         if time.time() - last_chk >= 300:
             last_chk = time.time()
             if code_changed():
-                log("وُجدت نسخة أحدث من الكود: إعادة التشغيل بها")
+                log("وُجدت نسخة أحدث من الكود: تطبيقها ثم إعادة التشغيل")
                 commit_state(block=True)
-                os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((deadline - time.time()) / 60, 1):.1f}"])
+                if not apply_update():
+                    last_chk = time.time() + 1500                                  # فشل التطبيق: نكمل بالنسخة الحالية ولا نعيد المحاولة قبل ~30 دقيقة
+                else:
+                    log("طُبّق التحديث: إعادة التشغيل")
+                    os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((deadline - time.time()) / 60, 1):.1f}"])
         # دورة سريعة (~20 ث): عيّنة سعر كل ~4 ثوانٍ، وMSNR يفحص لمس المستوى/الرفض/إعادة الاختبار بالسعر الحي فوراً
         t_end = time.time() + 20
         while time.time() < t_end:
