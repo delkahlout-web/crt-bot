@@ -6,7 +6,9 @@
   "maxAlertsPerDay": 15,
   "snapshotHours": 0,
   "tradeAlerts": true,
-  "stageAlerts": true,
+  "stageAlerts": false,
+  "v3Alerts": true,
+  "v3": {},
   "stageKinds": ["rej", "ret", "early"],
   "pro": {},
   "engine": {

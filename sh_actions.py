@@ -291,7 +291,7 @@ def code_changed():
         import subprocess
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
         run("git", "fetch", "-q", "origin", "main")
-        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_pro.py", "msnr_msgs.py", "msnr_config.json", "sh_track.py")
+        d = run("git", "diff", "--name-only", "HEAD", "origin/main", "--", "sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_pro.py", "msnr_msgs.py", "msnr_v3.py", "msnr_msgs3.py", "msnr_config.json", "sh_track.py")
         return bool(d.stdout.strip())
     except Exception:
         return False
@@ -348,7 +348,7 @@ def main():
     yh1 = {"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
-    errs = 0; last_chk = time.time()
+    errs = 0; last_chk = time.time(); ms_err = 0; last_bnd = int(time.time()) // 300
     while True:
         fresh_sent = False
         try:
@@ -425,8 +425,21 @@ def main():
                     if cur:
                         if MS.tick(tg, ch5, cur, time.time(), yh1["bars"], cfg.get("_basis"), cfg.get("displayTz", "Asia/Hebron")) > 0:
                             dirty = True
+                    ms_err = 0
             except Exception as ex:
-                log(f"MSNR خطأ: {ex}")
+                ms_err += 1
+                log(f"MSNR خطأ ({ms_err}): {ex}")
+                if ms_err >= 3:                                            # إصلاح ذاتي: إعادة تهيئة MSNR من الحالة المحفوظة بعد 3 أخطاء متتالية
+                    try:
+                        import importlib, msnr_actions as MA2
+                        importlib.reload(MA2); MS = MA2.Msnr(); ms_err = 0
+                        log("MSNR أُعيدت تهيئته تلقائياً")
+                        if time.time() - state.get("msnr_heal", 0) >= 6 * 3600:
+                            tg.send("🔧 MSNR أعاد تهيئة نفسه تلقائياً بعد خلل مؤقت ويعمل الآن.", silent=True); state["msnr_heal"] = time.time()
+                    except Exception as ex2:
+                        log(f"MSNR فشلت إعادة التهيئة: {ex2}")
+            if MS is not None and getattr(MS, "dirty", False):
+                dirty = True; MS.dirty = False
             save_state(state)
             if dirty:
                 commit_state()
@@ -454,7 +467,21 @@ def main():
                 log("وُجدت نسخة أحدث من الكود: إعادة التشغيل بها")
                 commit_state()
                 os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((deadline - time.time()) / 60, 1):.1f}"])
-        time.sleep(20); sample_spot(cfg.get("spotSym", "XAU"))   # دورة كل نحو 20 ثانية: عيّنة سعر فوري ثم فحص الإشارات (تأخير الاكتشاف ≤ نحو 25 ثانية)
+        # دورة سريعة (~20 ث): عيّنة سعر كل ~4 ثوانٍ، وMSNR يفحص لمس المستوى/الرفض/إعادة الاختبار بالسعر الحي فوراً
+        t_end = time.time() + 20
+        while time.time() < t_end:
+            time.sleep(4); sample_spot(cfg.get("spotSym", "XAU"))
+            if MS is not None and SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 30:
+                try:
+                    bnd = int(time.time()) // 300
+                    if bnd != last_bnd and time.time() - bnd * 300 >= 2:      # شمعة 5د أُغلقت للتو: عالجها فوراً
+                        last_bnd = bnd
+                        if MS.fast_bar(tg, spot_bars(time.time()), time.time(), cfg.get("displayTz", "Asia/Hebron")) > 0 and getattr(MS, "dirty", False):
+                            commit_state(); MS.dirty = False
+                    if MS.fast(tg, SPOT_BUF[-1][1], time.time(), cfg.get("displayTz", "Asia/Hebron")) > 0 and getattr(MS, "dirty", False):
+                        commit_state(); MS.dirty = False
+                except Exception as ex:
+                    log(f"MSNR فوري خطأ: {ex}")
 
 
 if __name__ == "__main__":

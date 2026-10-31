@@ -41,7 +41,10 @@ def rf_of(k):
 def bucket(t, tf):
     """(بداية، نهاية) الشمعة الكبيرة التي تحوي ساعة تبدأ عند t؛ اليوم يبدأ 17:00 نيويورك."""
     loc = dt.datetime.fromtimestamp(t, dt.timezone.utc).astimezone(NY).replace(tzinfo=None) + dt.timedelta(hours=7)
-    if tf == "D":
+    if tf == "W":
+        day = loc.replace(hour=0, minute=0, second=0, microsecond=0)
+        fl, sec = day - dt.timedelta(days=(loc.weekday() + 1) % 7), 604800
+    elif tf == "D":
         fl, sec = loc.replace(hour=0, minute=0, second=0, microsecond=0), 86400
     elif tf == "4H":
         fl, sec = loc.replace(hour=loc.hour // 4 * 4, minute=0, second=0, microsecond=0), 14400

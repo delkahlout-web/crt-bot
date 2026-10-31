@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 import msnr_engine as M
 import msnr_pro as MP
 import msnr_msgs as MG
+import msnr_v3 as V3M
+import msnr_msgs3 as MG3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SEED_PATH = os.path.join(HERE, "msnr_seed.json.gz")
@@ -25,7 +27,7 @@ LINE = "━━━━━━━━━━━━━━"
 SAME_LEVEL = 1.2                       # مستويان بينهما أقل من هذا (دولار) = نفس المستوى (إزاحة الأسعار الطفيفة)
 
 DEF = dict(alertPts=50.0, rearmPts=100.0, cooldownMin=30, maxAlertsPerDay=15, snapshotHours=24, enabled=True,
-           engine={}, pro={}, tradeAlerts=True, stageAlerts=False)
+           engine={}, pro={}, v3={}, tradeAlerts=True, stageAlerts=False, v3Alerts=True)
 
 
 def log(msg):
@@ -131,20 +133,26 @@ class Msnr:
         self.m30 = build_store(self.seed["m30"], self.st["m30"])
         self.m15 = build_store(self.seed["m15"], self.st["m15"])
         self.pro = MP.Pro(P=self.cfg.get("pro"), S=self.st.get("pro"))
+        self.v3 = V3M.V3(P=self.cfg.get("v3"), S=self.st.get("v3"))
         self.warmed = False
         self.pro.warmed_ok = False
+        self.dirty = False
         log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} (بذرة + ممتدة) | Trader Pro | إعداد: alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
 
     def advance(self, chart5, now):
         """يعالج شموع الشارت 5د المغلقة الجديدة بآلة Trader Pro ويعيد أحداثها."""
-        pro = self.pro; S = pro.S
-        cold = not S["last"]
+        pro = self.pro; S = pro.S; v3 = self.v3; S3 = v3.S
+        cold = not S["last"]; cold3 = not S3["last"]
         bars = [b for b in chart5 if b["time"] > S["last"] and b["time"] + 300 <= now]
-        if not self.warmed or bars:
+        bars3 = [b for b in chart5 if b["time"] > S3["last"] and b["time"] + 300 <= now]
+        if not self.warmed or bars or bars3:
             pro.set_candles(self.h1, self.m30, self.m15, chart5)
+            v3.set_candles(self.h1, self.m30, self.m15, chart5)
             if not self.warmed:
                 if S["last"]:
                     pro.warm(S["last"])
+                if S3["last"]:
+                    v3.warm(S3["last"] + 300)
                 self.warmed = True; pro.warmed_ok = True
         out = []
         for b in bars:
@@ -153,12 +161,68 @@ class Msnr:
             pro.step(b)
             out += pro.events
         pro.events = []
+        self.v3_events = []
+        for b in bars3:
+            v3.live = (not cold3) or b["time"] >= now - 1800
+            v3.events = []
+            v3.step(b)
+            self.v3_events += v3.events
+        v3.events = []
         if S["muted"] and S["st"] in (2, 3):             # صفقة وُلدت أثناء إعادة البناء الصامتة ولم تُرسَل: تُهمل كي لا تحجب الصفقات الجديدة
             S["st"] = 0
         return out
 
     def levels(self, chart5, cur, now, force=False):
-        return self.pro.shown(cur)
+        return self.v3.shown(cur, now)
+
+    def fast_bar(self, tg, bars, now, tz):
+        """عند إغلاق شمعة 5د مباشرة (بعد ثوانٍ لا بعد دورة الحساب الكاملة): يعالج الشمعة الجديدة في محرك v3 ويرسل REJ/RET المؤكَّدة فوراً."""
+        if not self.cfg.get("enabled", True) or not self.warmed or not self.cfg.get("v3Alerts", True):
+            return 0
+        v3 = self.v3; c5 = v3.chart5
+        last = max(c5[-1]["time"] if c5 else 0, v3.S["last"])
+        new = [b for b in bars if b["time"] > last and b["time"] + 300 <= now]
+        if not new:
+            return 0
+        v3.set_candles(self.h1, self.m30, self.m15, list(c5) + new)
+        sent = 0
+        for b in new:
+            v3.live = True; v3.events = []
+            v3.step(b)
+            for e in v3.events:
+                if e["kind"] in ("touch", "rej", "ret"):
+                    txt = MG3.v3_text(e, tz, v3.P)
+                    if tg.send(txt):
+                        sent += 1
+                    else:
+                        self.st.setdefault("outbox", []).append(dict(t=e["at"], text=txt))
+                    log(f"شمعة مغلقة: {e['kind']} {e['tag']} @ {e['p']:.2f}")
+        v3.events = []
+        self.st["v3"] = v3.S
+        save_state(self.st)
+        if sent:
+            self.dirty = True
+        return sent
+
+    def fast(self, tg, cur, now, tz):
+        """يُستدعى كل بضع ثوانٍ بالسعر الحي: لمس المستوى / رفض مبدئي / لمس إعادة اختبار — فوراً. يعيد عدد الرسائل المرسلة."""
+        if not self.cfg.get("enabled", True) or not self.warmed or not self.cfg.get("v3Alerts", True):
+            return 0
+        mkt = bool(self.v3.chart5) and now - (self.v3.chart5[-1]["time"] + 300) <= 1200
+        if not mkt:
+            return 0
+        sent = 0
+        for e in self.v3.fast(cur, now):
+            txt = MG3.v3_text(e, tz, self.v3.P)
+            if tg.send(txt):
+                sent += 1
+            else:
+                self.st.setdefault("outbox", []).append(dict(t=now, text=txt))
+            log(f"فوري: {e['kind']} {e['tag']} @ {e['p']:.2f} | السعر {cur:.2f}")
+        if sent:
+            self.st["v3"] = self.v3.S; self.st["pro"] = self.pro.S
+            save_state(self.st); self.dirty = True
+        return sent
 
     def tick(self, tg, chart5, cur, now, yahoo_h1, basis, tz):
         """يُستدعى كل دقيقة. يعيد عدد الرسائل المرسلة. لا يرفع استثناءً لخارج (يُسجَّل فقط)."""
@@ -178,6 +242,10 @@ class Msnr:
                 ob.append(dict(t=e["time"], text=MG.trade_text(e, tz, P)))
             elif e["kind"] in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.cfg.get("stageAlerts", False):
                 ob.append(dict(t=e["time"], text=MG.stage_text(e, tz)))
+        if self.cfg.get("v3Alerts", True) and mkt:
+            for e in getattr(self, "v3_events", []):
+                if e["kind"] in ("touch", "rej", "ret"):
+                    ob.append(dict(t=e["at"], text=MG3.v3_text(e, tz, self.v3.P)))
         # تنبيه مبكر فوري: بعد REJ، حين يعود السعر الحي ويلمس المستوى (إعادة اختبار) نُرسل فوراً دون انتظار إغلاق شمعة التأكيد
         if mkt and self.cfg.get("stageAlerts", False) and "early" in self.cfg.get("stageKinds", ["rej", "ret", "early"]) and self.pro.warmed_ok:
             tol = P["retTol"] * P["pipSize"]
@@ -197,6 +265,7 @@ class Msnr:
                 keep.append(m)
         self.st["outbox"] = keep[-20:]
         self.st["pro"] = self.pro.S
+        self.st["v3"] = self.v3.S
         if not mkt:                                                              # السوق مغلق: لا لقطة ولا تنبيهات اقتراب بسعر قديم
             save_state(self.st)
             return sent
