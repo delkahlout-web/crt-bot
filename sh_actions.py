@@ -8,7 +8,7 @@ SH v2 + RSI — تشغيل على GitHub Actions (مرة كل 5 دقائق). ن�
     python sh_actions.py --test       رسالة تجربة
     python sh_actions.py --history 3  أحداث آخر 3 أيام على الشاشة بدون إرسال
 """
-import json, os, sys, time, datetime as dt
+import json, os, sys, threading, time, datetime as dt
 import pandas as pd
 import requests
 import yfinance as yf
@@ -36,7 +36,9 @@ def load_state():
 
 def save_state(st):
     st["sent"] = st["sent"][-800:]
-    json.dump(st, open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    tmp = STATE_PATH + ".tmp"                                   # كتابة ذرّية: لا يقرأ git ملفاً نصف مكتوب
+    json.dump(st, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    os.replace(tmp, STATE_PATH)
 
 
 _YC = {}          # تخزين مؤقت لشموع Yahoo (مفتاح: الرمز/الفريم/المدة)
@@ -71,10 +73,28 @@ def yf_candles(ticker, interval, period, minutes, ttl=0):
     raise RuntimeError(f"فشل جلب {ticker} {interval}: {last}")
 
 
-def commit_state():
-    """داخل GitHub Actions: يحفظ الحالة فوراً (3 محاولات) حتى لا تتكرر الرسائل ولا يظن الحارس أن البوت معلّق."""
+_COMMIT_LOCK = threading.Lock()
+
+
+def commit_state(block=False):
+    """داخل GitHub Actions: يحفظ الحالة (3 محاولات) في خيط خلفي كي لا يتأخر كشف الإشارات لحظة؛ block=True قبل إعادة التشغيل."""
     if os.environ.get("GITHUB_ACTIONS") != "true":
         return
+    if not _COMMIT_LOCK.acquire(blocking=block):
+        return                                                   # عملية حفظ جارية: الحالة القادمة تلتقطها
+
+    def work():
+        try:
+            _commit_state_sync()
+        finally:
+            _COMMIT_LOCK.release()
+    if block:
+        work()
+    else:
+        threading.Thread(target=work, daemon=True).start()
+
+
+def _commit_state_sync():
     try:
         import subprocess
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
@@ -85,11 +105,11 @@ def commit_state():
         if run("git", "diff", "--cached", "--quiet").returncode == 0:
             return
         run("git", "commit", "-m", "sh state")
-        for k in range(3):
-            run("git", "pull", "--rebase", "-q")
+        for k in range(4):
             if run("git", "push").returncode == 0:
                 return
-            time.sleep(3 * (k + 1))
+            run("git", "pull", "--rebase", "--autostash", "-q")             # الملفات تتغيّر أثناء الحفظ الخلفي: autostash يمنع رفض السحب
+            time.sleep(2 * (k + 1))
         log("تعذّر دفع الحالة بعد 3 محاولات")
     except Exception as ex:
         log(f"تعذّر حفظ الحالة: {ex}")
@@ -348,7 +368,7 @@ def main():
     yh1 = {"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
-    errs = 0; last_chk = time.time(); ms_err = 0; last_bnd = int(time.time()) // 300
+    errs = 0; last_chk = time.time(); ms_err = 0; last_bnd = int(time.time()) // 300; last_commit = time.time()
     while True:
         fresh_sent = False
         try:
@@ -441,8 +461,8 @@ def main():
             if MS is not None and getattr(MS, "dirty", False):
                 dirty = True; MS.dirty = False
             save_state(state)
-            if dirty:
-                commit_state()
+            if dirty or time.time() - last_commit >= 1800:             # + حفظ دوري كل 30 دقيقة ولو بلا رسائل
+                commit_state(); last_commit = time.time()
         except Exception as ex:
             errs += 1
             log(f"خطأ ({errs}): {ex}")
@@ -465,7 +485,7 @@ def main():
             last_chk = time.time()
             if code_changed():
                 log("وُجدت نسخة أحدث من الكود: إعادة التشغيل بها")
-                commit_state()
+                commit_state(block=True)
                 os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((deadline - time.time()) / 60, 1):.1f}"])
         # دورة سريعة (~20 ث): عيّنة سعر كل ~4 ثوانٍ، وMSNR يفحص لمس المستوى/الرفض/إعادة الاختبار بالسعر الحي فوراً
         t_end = time.time() + 20
