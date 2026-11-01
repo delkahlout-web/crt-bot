@@ -251,6 +251,10 @@ class Msnr:
         P = self.v4.P
         mkt = bool(chart5) and now - (chart5[-1]["time"] + 300) <= 1200          # السوق مفتوح: آخر شمعة 5د حديثة
         ev4, evp = self._run_bars(chart5, now)
+        if mkt and chart5:
+            lag = max(chart5[-1]["time"] - self.v4.S["last"], chart5[-1]["time"] - self.plan.S["last"])
+            if lag > 900:                                                         # المحرّكات متخلفة عن الشموع أكثر من 15 دقيقة: إصلاح ذاتي بإعادة التهيئة
+                raise RuntimeError(f"تخلّف معالجة الشموع {lag // 60} دقيقة")
         if not mkt:
             ev4 = []; evp = []                                                    # لا رسائل بسعر قديم والسوق مغلق
         sent += self._emit(tg, ev4, evp, tz, now)

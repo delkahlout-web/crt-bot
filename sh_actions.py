@@ -393,7 +393,7 @@ def main():
     yh1 = {"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
-    errs = 0; last_chk = time.time(); ms_err = 0; last_bnd = int(time.time()) // 300; last_commit = time.time()
+    errs = 0; last_chk = time.time(); ms_err = 0; fast_err = 0; last_bnd = int(time.time()) // 300; last_commit = time.time()
     while True:
         fresh_sent = False
         try:
@@ -452,8 +452,8 @@ def main():
             dirty = fresh_sent
             # تنبيه عند تعطّل المصدر اللحظي أثناء السوق (مرة كل ساعة كحد أقصى)
             state["degN"] = state.get("degN", 0) + 1 if meta.get("mode") == "degraded" else 0
-            if sh_on and state["degN"] >= 5 and now - state.get("warn", 0) >= 3600:
-                if tg.send("⚠️ <b>تنبيه SH:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر الإشارات. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر."):
+            if state["degN"] >= 5 and now - state.get("warn", 0) >= 3600:
+                if tg.send("⚠️ <b>تنبيه البوت:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر رسائل MSNR. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر."):
                     state["warn"] = now; dirty = True
             # نبض: «البوت حيّ» كل ساعتين (صامت بلا صوت)
             if beat_every > 0 and now - state.get("beat", 0) >= beat_every:
@@ -529,8 +529,17 @@ def main():
                             commit_state(); MS.dirty = False
                     if MS.fast(tg, SPOT_BUF[-1][1], time.time(), cfg.get("displayTz", "Asia/Hebron")) > 0 and getattr(MS, "dirty", False):
                         commit_state(); MS.dirty = False
+                    fast_err = 0
                 except Exception as ex:
-                    log(f"MSNR فوري خطأ: {ex}")
+                    fast_err += 1
+                    log(f"MSNR فوري خطأ ({fast_err}): {ex}")
+                    if fast_err >= 5:                                              # إصلاح ذاتي: 5 أخطاء لحظية متتالية = إعادة تهيئة MSNR من الحالة المحفوظة
+                        try:
+                            import importlib, msnr_actions as MA3
+                            importlib.reload(MA3); MS = MA3.Msnr(); fast_err = 0
+                            log("MSNR أُعيدت تهيئته تلقائياً (من الدورة اللحظية)")
+                        except Exception as ex3:
+                            log(f"MSNR فشلت إعادة التهيئة: {ex3}")
 
 
 if __name__ == "__main__":
