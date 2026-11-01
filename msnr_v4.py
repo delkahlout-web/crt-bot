@@ -10,6 +10,7 @@ MSNR Key Levels v4 — ترجمة حرفية لمؤشر «MSNR-B2 v4».
 import msnr_pro as MP
 
 TFN = ["W", "D", "4H", "1H", "30M", "15M"]
+NEXT_TF = ["D", "4H", "1H", "30M", "15M", "5M"]          # فريم التأكيد/الدخول التالي الأصغر (الفيديو 17)
 SECS = [604800, 86400, 14400, 3600, 1800, 900]
 DEF = dict(
     tfOn=[True, True, True, True, True, False], classicMode=0,
@@ -60,12 +61,18 @@ class Eng4:
         c3 = g(3, "close"); c4 = g(4, "close"); c5 = g(5, "close")
         lv = self.lv
         flipOn = P["kFlip"]; qmlOn = P["kQML"]
+        broke_above = broke_below = False
         if lv:
             for i in range(len(lv) - 1, -1, -1):
                 L = lv[i]; p = L["p"]; r = L["r"]; gone = False
                 if t1 > L["tm"] and L["lb"] < t1:
                     L["lb"] = t1
                     beyond = (c1 < p) if r == 1 else (c1 > p)
+                    if beyond:
+                        if r == -1:
+                            broke_above = True
+                        else:
+                            broke_below = True
                     touchedB = (l1 <= p) if r == 1 else (h1 >= p)
                     nb = L["bk"]
                     canFlip = (nb == 0 and flipOn) or (nb == 1 and qmlOn)
@@ -75,7 +82,7 @@ class Eng4:
                     def flip():
                         L["r"] = -r; L["kd"] = 3 if nb == 0 else 4; L["bk"] = nb + 1; L["tm"] = t1
                         L["ts"] = 0; L["ac"] = 1; L["br"] = 1; L["lq"] = 0; L["wt"] = 0; L["af"] = 0
-                        L["us"] = 0; L["um"] = 0; L["un"] = 0; L["ut"] = 0; L["e3"] = 0
+                        L["us"] = 0; L["um"] = 0; L["un"] = 0; L["ut"] = 0; L["e3"] = 0; L["e1"] = 0
 
                     def reject(um):
                         L["us"] = 2
@@ -183,8 +190,8 @@ class Eng4:
                 else:
                     if self.lastSL is not None and self.lastSL < c1:
                         oppP = self.lastSL
-                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0, lq=0, wt=0,
-                               us=0, um=0, un=0, ut=0, af=1 if actF else 0, ux=0, uw=None, uq=None, e3=0))
+                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=1 if ((role == 1 and broke_above) or (role == -1 and broke_below)) else 0, lq=0, wt=0,
+                               us=0, um=0, un=0, ut=0, af=1 if actF else 0, ux=0, uw=None, uq=None, e3=0, e1=0))
                 if len(lv) > 60:
                     ev = next((k for k, L in enumerate(lv) if L["us"] > 0), 0)
                     lv.pop(ev)
@@ -206,6 +213,7 @@ class V4:
         self.ptr = [0] * 6; self.fed = [0] * 6
         self.chart5 = []
         self.events = []; self.live = True
+        self._pcur = None
 
     # ───────────── حفظ/استعادة حالة المحرّكات (تشغيل متقطع = نفس النتيجة تماماً) ─────────────
     def dump(self):
@@ -327,7 +335,7 @@ class V4:
     def allowed(self, kind, L, at):
         """رسالة واحدة لكل مرحلة لكل مستوى (ولو تكرر على أكثر من فريم): رفض ← إعادة اختبار، ولا إعادة اختبار قبل رفض."""
         P = self.P; sent = self.S.setdefault("sent", [])
-        stage = "ret" if kind in ("ret", "retE") else "rej"
+        stage = "ret" if kind in ("ret", "retE") else "touch" if kind == "touch" else "rej"
         tol = P["mergeGap"] * P["pipSize"]; hh = P["dedupeH"] * 3600
         self.S["sent"] = sent = [m for m in sent if at - m["t"] < 12 * 3600]
         near = [m for m in sent if m["r"] == L["r"] and abs(m["p"] - L["p"]) <= tol]
@@ -340,12 +348,25 @@ class V4:
 
     def make_event(self, kind, g, L, at, cur, live=False):
         z = self.zone(L)
+        why = why_of(L); nxt = NEXT_TF[g]
         return dict(kind=kind, p=L["p"], role=L["r"], tag=self.cluster_tag(g, L), g=g, cf=TFN[g], cur=cur, x=L.get("ux", 0), w=L.get("uw"), c=L.get("uq"),
-                    zone=z, mid=(None if z is None else (z[0] + z[1]) / 2), refine=self.refine_of(g, L, cur), at=at, fake=bool(L.get("um")), af=L.get("af"), live=live)
+                    zone=z, mid=(None if z is None else (z[0] + z[1]) / 2), refine=self.refine_of(g, L, cur), at=at, fake=bool(L.get("um")), af=L.get("af"), live=live, why=why, nxt=nxt, rank=TFN[g])
 
     # ───────────── معالجة شمعة شارت 5د مغلقة ─────────────
     def step(self, bar):
         S = self.S; T = int(bar["time"]); end = T + 300; cur = bar["close"]
+        P = self.P; pc = S.get("pc"); kon = {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}
+        for g in range(P["msgMaxG"] + 1):                       # لمس بالشمعة (يلتقط ما فاته العيّنات الحية) قبل أن تُغلق شمعة الفريم وتحوّله إلى رفض
+            if not P["tfOn"][g]:
+                continue
+            for L in self.E[g].lv:
+                if L["us"] == 0 and L["pd"] == 0 and not L.get("e1") and kon[L["kd"]] and L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= P["minStars"]:
+                    sup = L["r"] == 1; p = L["p"]
+                    if ((bar["low"] <= p) if sup else (bar["high"] >= p)) and (pc is None or ((pc > p) if sup else (pc < p))):
+                        L["e1"] = 1
+                        if self.live and self.allowed("touch", L, end):
+                            self.events.append(self.make_event("touch", g, L, end, cur))
+        S["pc"] = cur
         for g, kind, snap, c in self.feed_until(end):
             if not self.live or g > self.P["msgMaxG"] or not self.P["tfOn"][g]:
                 continue
@@ -364,10 +385,18 @@ class V4:
         if not P["touchLive"]:
             return out
         tol = P["retTolPts"] * pip
+        prev = self._pcur; self._pcur = cur
+        kon = {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}
         for g in range(P["msgMaxG"] + 1):
             if not P["tfOn"][g]:
                 continue
             for L in self.E[g].lv:
+                if (prev is not None and L["us"] == 0 and L["pd"] == 0 and not L.get("e1") and kon[L["kd"]] and L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= P["minStars"]):
+                    sup = L["r"] == 1; p = L["p"]
+                    if (sup and prev > p >= cur) or ((not sup) and prev < p <= cur):          # عبر السعر الحي المستوى الطازج للتو
+                        L["e1"] = 1
+                        if self.allowed("touch", L, now):
+                            out.append(self.make_event("touch", g, L, now, cur, live=True))
                 if L["us"] == 2 and not L["e3"] and L["un"] < P["retestC"] + 1:
                     sup = L["r"] == 1; p = L["p"]
                     if (sup and p - 2 * tol <= cur <= p + tol) or ((not sup) and p - tol <= cur <= p + 2 * tol):
