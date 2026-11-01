@@ -127,6 +127,11 @@ def alert_text(c, cur, tz, P):
             f"💪 القوة والنوع: {desc}\n{LINE}\n🕒 {fmt_time(time.time(), tz)}")
 
 
+# تصميم الرسائل الموحَّد (msnr_msgs3) يحلّ محلّ الدوال أعلاه
+snapshot_text = MG3.snapshot_text
+alert_text = MG3.alert_text
+
+
 class Msnr:
     def __init__(self):
         self.cfg = load_cfg()
