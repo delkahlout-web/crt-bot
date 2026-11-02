@@ -17,7 +17,10 @@ from sh_engine import run_engine, DEFAULTS
 from sh_messages import message, ev_key, NAME, fmt_time
 import crt_bot as core                      # Telegram فقط
 import sh_track as T
-import msnr_subs as SUBS
+try:
+    import msnr_subs as SUBS
+except Exception:                           # لا يُوقف البوت إن غاب هذا الملف مؤقتاً
+    SUBS = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "sh_state.json")
@@ -322,21 +325,25 @@ def code_changed():
         return False
 
 
+STATE_FILES = {"sh_state.json", "msnr_state.json", "state.json", "bot.log"}
+
+
 def apply_update():
-    """يجلب الكود الجديد فعلياً إلى القرص (سحب ثم نسخ احتياطي للملفات) ويتحقق أنه صار مطابقاً قبل إعادة التشغيل؛ يمنع حلقة إعادة تشغيل بلا تحديث."""
+    """يطبّق الكود الجديد دون أي تعارض: fetch ثم reset مختلط إلى origin/main (يترك ملفات الحالة المعدّلة كما هي) ثم استعادة كل ملف كود من الفهرس.
+    لا يعتمد على قائمة ملفات قديمة (فيشمل الملفات الجديدة)، ويتحقق أن لا فرق متبقٍ قبل إعادة التشغيل."""
     try:
         import subprocess
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=90)
-        r = run("git", "pull", "--rebase", "--autostash", "-q")
+        run("git", "fetch", "-q", "origin", "main")
+        r = run("git", "reset", "-q", "origin/main")
         if r.returncode != 0:
-            run("git", "rebase", "--abort")
-            names = run("git", "diff", "--name-only", "origin/main", "--", *CODE_FILES).stdout.split()
-            if names:
-                run("git", "checkout", "origin/main", "--", *names)
-                run("git", "reset", "-q", "--", *names)
-        left = run("git", "diff", "--name-only", "origin/main", "--", *CODE_FILES).stdout.strip()
+            log(f"تعذّر reset: {r.stderr[:150]}")
+        names = [n for n in run("git", "diff", "--name-only").stdout.split() if n not in STATE_FILES]
+        if names:
+            run("git", "checkout", "--", *names)
+        left = [n for n in run("git", "diff", "--name-only").stdout.split() if n not in STATE_FILES]
         if left:
-            log(f"التحديث لم يكتمل: {left.replace(chr(10), ' ')}")
+            log(f"التحديث لم يكتمل: {' '.join(left)}")
         return not left
     except Exception as ex:
         log(f"تعذّر تطبيق التحديث: {ex}")
@@ -371,7 +378,8 @@ def main():
         print("Telegram:", "OK" if ok else "فشل")
         sys.exit(0 if ok else 1)                    # تظهر الخطوة حمراء في GitHub عند الفشل
     state = load_state()
-    tg = SUBS.Broadcast(tg, state, cfg.get("subscribeCode", ""), cfg.get("maxSubs", 100), log)        # كل رسالة تصل المشتركين لحظياً (private=True لصاحب البوت فقط)
+    if SUBS is not None:
+        tg = SUBS.Broadcast(tg, state, cfg.get("subscribeCode", ""), cfg.get("maxSubs", 100), log)        # كل رسالة تصل المشتركين لحظياً (private=True لصاحب البوت فقط)
     if "--history" in args:
         evs, last_t, P = compute(cfg, state)
         k = args.index("--history")
@@ -523,9 +531,10 @@ def main():
         while time.time() < t_end:
             time.sleep(4); sample_spot(cfg.get("spotSym", "XAU"))
             try:
-                tg.poll()                                                         # /start و/stop من المشتركين (رد خلال ثوانٍ)
-                if tg.dirty:
-                    save_state(state); commit_state(); tg.dirty = False
+                if hasattr(tg, "poll"):
+                    tg.poll()                                                     # /start و/stop من المشتركين (رد خلال ثوانٍ)
+                    if tg.dirty:
+                        save_state(state); commit_state(); tg.dirty = False
             except Exception as exs:
                 log(f"مشتركون: {exs}")
             if MS is not None and SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 30:

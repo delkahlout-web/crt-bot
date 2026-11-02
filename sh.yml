@@ -46,11 +46,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           me=${{ github.run_id }}
-          for i in $(seq 1 24); do
+          for i in $(seq 1 144); do
             others=$(gh run list --repo "${{ github.repository }}" --workflow sh.yml --status in_progress --json databaseId --jq "[.[] | select(.databaseId < $me)] | length")
             if [ "$others" = "0" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; fi
             if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then break; fi
-            sleep 30
+            sleep 5
           done
           echo "go=false" >> "$GITHUB_OUTPUT"
           echo "تشغيل آخر يعمل: خروج"
@@ -96,6 +96,6 @@ jobs:
           me=${{ github.run_id }}
           succ=$(gh run list --repo "${{ github.repository }}" --workflow sh.yml --status in_progress --json databaseId --jq "[.[] | select(.databaseId > $me)] | length" || echo 0)
           if [ "$succ" = "0" ]; then
-            sleep 20
+            sleep 5
             gh workflow run sh.yml --repo "${{ github.repository }}" -f test=false || true
           fi
