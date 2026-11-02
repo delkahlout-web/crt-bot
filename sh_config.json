@@ -1,5 +1,7 @@
 {
   "shEnabled": false,
+  "subscribeCode": "",
+  "maxSubs": 100,
   "chatId": "779068317",
   "ticker": "GC=F",
   "spotSym": "XAU",

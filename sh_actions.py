@@ -17,6 +17,7 @@ from sh_engine import run_engine, DEFAULTS
 from sh_messages import message, ev_key, NAME, fmt_time
 import crt_bot as core                      # Telegram فقط
 import sh_track as T
+import msnr_subs as SUBS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "sh_state.json")
@@ -304,7 +305,7 @@ def compute(cfg, state):
 
 
 CODE_FILES = ["sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_pro.py", "msnr_msgs.py",
-              "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_config.json", "sh_track.py"]
+              "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_subs.py", "msnr_config.json", "sh_track.py"]
 
 
 def code_changed():
@@ -370,6 +371,7 @@ def main():
         print("Telegram:", "OK" if ok else "فشل")
         sys.exit(0 if ok else 1)                    # تظهر الخطوة حمراء في GitHub عند الفشل
     state = load_state()
+    tg = SUBS.Broadcast(tg, state, cfg.get("subscribeCode", ""), cfg.get("maxSubs", 100), log)        # كل رسالة تصل المشتركين لحظياً (private=True لصاحب البوت فقط)
     if "--history" in args:
         evs, last_t, P = compute(cfg, state)
         k = args.index("--history")
@@ -453,12 +455,12 @@ def main():
             # تنبيه عند تعطّل المصدر اللحظي أثناء السوق (مرة كل ساعة كحد أقصى)
             state["degN"] = state.get("degN", 0) + 1 if meta.get("mode") == "degraded" else 0
             if state["degN"] >= 5 and now - state.get("warn", 0) >= 3600:
-                if tg.send("⚠️ <b>تنبيه البوت:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر رسائل MSNR. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر."):
+                if tg.send("⚠️ <b>تنبيه البوت:</b> المصدر اللحظي للأسعار معطّل والسوق مفتوح. البيانات الآن متأخرة 10–15 دقيقة، فقد تتأخر رسائل MSNR. سأعود للوضع الطبيعي تلقائياً حين يعود المصدر.", private=True):
                     state["warn"] = now; dirty = True
             # نبض: «البوت حيّ» كل ساعتين (صامت بلا صوت)
             if beat_every > 0 and now - state.get("beat", 0) >= beat_every:
                 # النبض يُسجَّل في الحالة (يراقبه الحارس)؛ وإرساله لتلجرام اختياري ومتوقف افتراضياً لأنه مزعج
-                if not cfg.get("heartbeatTelegram", False) or tg.send(heartbeat_text(cfg, P), silent=True):
+                if not cfg.get("heartbeatTelegram", False) or tg.send(heartbeat_text(cfg, P), silent=True, private=True):
                     state["beat"] = now; dirty = True
             try:
                 if MS is not None:
@@ -480,7 +482,7 @@ def main():
                         importlib.reload(MA2); MS = MA2.Msnr(); ms_err = 0
                         log("MSNR أُعيدت تهيئته تلقائياً")
                         if time.time() - state.get("msnr_heal", 0) >= 6 * 3600:
-                            tg.send("🔧 MSNR أعاد تهيئة نفسه تلقائياً بعد خلل مؤقت ويعمل الآن.", silent=True); state["msnr_heal"] = time.time()
+                            tg.send("🔧 MSNR أعاد تهيئة نفسه تلقائياً بعد خلل مؤقت ويعمل الآن.", silent=True, private=True); state["msnr_heal"] = time.time()
                     except Exception as ex2:
                         log(f"MSNR فشلت إعادة التهيئة: {ex2}")
             if MS is not None and getattr(MS, "dirty", False):
@@ -492,7 +494,7 @@ def main():
             errs += 1
             log(f"خطأ ({errs}): {ex}")
             if errs >= 5 and time.time() - state.get("warn", 0) >= 3600:       # 5 أخطاء متتالية ≈ 5 دقائق
-                if tg.send(f"⚠️ <b>تنبيه SH:</b> البوت يواجه أخطاء متكررة منذ دقائق ولا يستطيع جلب الأسعار. سيعيد المحاولة تلقائياً.\nآخر خطأ: {str(ex)[:150]}"):
+                if tg.send(f"⚠️ <b>تنبيه SH:</b> البوت يواجه أخطاء متكررة منذ دقائق ولا يستطيع جلب الأسعار. سيعيد المحاولة تلقائياً.\nآخر خطأ: {str(ex)[:150]}", private=True):
                     state["warn"] = time.time(); save_state(state)
         if not handover and loop_min >= 30 and time.time() >= deadline - 420 and os.environ.get("GH_TOKEN"):
             # تسليم بلا فجوة: قبل 7 دقائق من النهاية نُشغّل التشغيل التالي (ينتظر هو انتهاء هذا ثم يبدأ)
@@ -520,6 +522,12 @@ def main():
         t_end = time.time() + 20
         while time.time() < t_end:
             time.sleep(4); sample_spot(cfg.get("spotSym", "XAU"))
+            try:
+                tg.poll()                                                         # /start و/stop من المشتركين (رد خلال ثوانٍ)
+                if tg.dirty:
+                    save_state(state); commit_state(); tg.dirty = False
+            except Exception as exs:
+                log(f"مشتركون: {exs}")
             if MS is not None and SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 30:
                 try:
                     bnd = int(time.time()) // 300
