@@ -25,7 +25,7 @@ OWNER_HELP = ("🛠 <b>لوحة التحكم</b>\n┄┄┄┄┄┄┄┄┄┄
               "<code>/ban رقم_أو_@اسم</code> — حظر (لا يستطيع الاشتراك)\n"
               "<code>/unban رقم_أو_@اسم</code> — فك الحظر\n"
               "<code>/say نص</code> — رسالة لكل المشتركين\n"
-              "/map — خريطة المناطق")
+              "/map — خريطة المناطق\n/health — حالة النظام الآن")
 
 
 def _ago(t):
@@ -41,13 +41,23 @@ class Broadcast:
         state.setdefault("upd", 0)
         self.dirty = False
         self.handlers = {}                                           # أوامر إضافية: {"/map": دالة تعيد النص}
+        self.owner_handlers = {}                                     # أوامر لصاحب البوت فقط: {"/health": دالة}
         self.base = tg.base; self.token = tg.token; self.chat_id = tg.chat_id
         self._lock = threading.Lock(); self._menu = False
 
     # ───────────── إرسال ─────────────
+    def bump(self, key, n=1):
+        """عدّاد يومي في الحالة (للتقرير و/health)."""
+        st = self.state.setdefault("stats", {})
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if st.get("day") != day:
+            st.clear(); st["day"] = day
+        st[key] = st.get(key, 0) + n
+
     def send(self, text, silent=False, private=False):
         if not private:
             self.fanout(text, silent)
+            self.bump("msgs")
         return self.tg.send(text, silent)
 
     def fanout(self, text, silent=False):
@@ -130,6 +140,12 @@ class Broadcast:
         return "أمر غير معروف"
 
     def _owner(self, cid, text, cmd, arg):
+        if cmd in self.owner_handlers:
+            try:
+                self._post(cid, self.owner_handlers[cmd]())
+            except Exception as exh:
+                self.log(f"أمر {cmd}: {exh}"); self._post(cid, f"تعذّر: {exh}")
+            return True
         if cmd in ("/users", "/panel", "/help"):
             if cmd == "/help":
                 self._post(cid, OWNER_HELP)
@@ -160,7 +176,7 @@ class Broadcast:
                    {"command": "map", "description": "خريطة أقوى المناطق"}, {"command": "status", "description": "حالة اشتراكك"}]
             self._api("setMyCommands", commands=json.dumps(pub, ensure_ascii=False))
             own = pub + [{"command": "users", "description": "لوحة المستخدمين (حظر/إزالة)"}, {"command": "say", "description": "رسالة لكل المشتركين"},
-                         {"command": "help", "description": "أوامر المشرف"}]
+                         {"command": "help", "description": "أوامر المشرف"}, {"command": "health", "description": "حالة النظام الآن"}]
             self._api("setMyCommands", commands=json.dumps(own, ensure_ascii=False), scope=json.dumps({"type": "chat", "chat_id": int(self.chat_id)}))
         except Exception as ex:
             self.log(f"قائمة الأوامر: {ex}")

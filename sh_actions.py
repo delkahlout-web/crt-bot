@@ -389,6 +389,27 @@ def heartbeat_text(cfg, P):
 HB = {"t": time.time(), "deadline": 0.0, "on": False}
 
 
+def health_text(state, tg, MS, tz):
+    """حالة النظام الآن (للأمر /health ولتقرير اليوم): تشغيل، عمر الشموع والحفظ، الأخطاء، الرسائل، المشتركون."""
+    now = time.time(); st = state.get("stats", {})
+    up = (now - START_T) / 60
+    bar = (now - MS.v4.S["last"] - 300) / 60 if (MS is not None and MS.v4.S.get("last")) else None
+    spot = (now - SPOT_BUF[-1][0]) if SPOT_BUF else None
+    push = (now - LAST_PUSH["ok"]) / 60
+    pl = MS.plan.S if MS is not None else {}
+    lat = ", ".join(f"{x:.0f}ث" for x in (MS._lat[-3:] if MS is not None else [])) or "—"
+    rows = [f"⏱ تشغيل الجولة: {up / 60:.1f} س" if up >= 60 else f"⏱ تشغيل الجولة: {up:.0f} د",
+            f"📊 آخر شمعة معالَجة: قبل {bar:.0f} د" if bar is not None else "📊 آخر شمعة: —",
+            f"💲 آخر عيّنة سعر: قبل {spot:.0f} ث" if spot is not None else "💲 السعر: لا عيّنات",
+            f"💾 آخر حفظ على GitHub: قبل {push:.0f} د  (إخفاقات: {LAST_PUSH['fail']})",
+            f"📨 رسائل اليوم: {st.get('msgs', 0)}  ·  أخطاء: {st.get('errs', 0)}  ·  إصلاحات ذاتية: {st.get('heals', 0)}  ·  بدايات تشغيل: {st.get('starts', 0)}",
+            f"🧮 تأخير المعالجة الأخير: {lat}",
+            f"👥 مشتركون: {len(state.get('subs', {}))}  ·  محظورون: {len(state.get('banned', {}))}",
+            f"🎯 صفقات الجلسة: {pl.get('w', 0)} رابحة / {pl.get('l', 0)} خاسرة"]
+    ok = (bar is None or bar < 12) and push < 45 and LAST_PUSH["fail"] == 0
+    return "🩺 <b>حالة النظام</b> " + ("🟢 سليم" if ok else "🟠 يحتاج انتباه") + "\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n" + "\n".join(rows)
+
+
 def start_watchdog():
     """حارس داخلي: إن لم تُكمل الحلقة أي خطوة خلال 4 دقائق (تعليق شبكة أو غيره) يُعيد البوت تشغيل نفسه فوراً بالحالة المحفوظة."""
     def run_wd():
@@ -447,6 +468,8 @@ def main():
         return MS.map_reply(cur, cfg.get("displayTz", "Asia/Hebron")) if (MS is not None and cur is not None) else "الخريطة غير جاهزة بعد، حاول بعد دقيقة."
     if hasattr(tg, "handlers"):
         tg.handlers["/map"] = map_reply; tg.handlers["/levels"] = map_reply
+        tg.owner_handlers["/health"] = lambda: health_text(state, tg, MS, cfg.get("displayTz", "Asia/Hebron"))
+        tg.bump("starts")
     yh1 = {"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
@@ -532,17 +555,25 @@ def main():
             except Exception as ex:
                 ms_err += 1
                 log(f"MSNR خطأ ({ms_err}): {ex}")
+                if hasattr(tg, "bump"):
+                    tg.bump("errs")
                 if ms_err >= 3 or getattr(ex, "fatal", False):                                            # إصلاح ذاتي: إعادة تهيئة MSNR من الحالة المحفوظة بعد 3 أخطاء متتالية
                     try:
                         import importlib, msnr_actions as MA2
                         importlib.reload(MA2); MS = MA2.Msnr(); ms_err = 0
                         log("MSNR أُعيدت تهيئته تلقائياً")
+                        if hasattr(tg, "bump"):
+                            tg.bump("heals")
                         if time.time() - state.get("msnr_heal", 0) >= 6 * 3600:
                             tg.send("🔧 MSNR أعاد تهيئة نفسه تلقائياً بعد خلل مؤقت ويعمل الآن.", silent=True, private=True); state["msnr_heal"] = time.time()
                     except Exception as ex2:
                         log(f"MSNR فشلت إعادة التهيئة: {ex2}")
             if MS is not None and getattr(MS, "dirty", False):
                 dirty = True; MS.dirty = False
+            gm = time.gmtime()
+            if hasattr(tg, "bump") and gm.tm_hour == 21 and gm.tm_min >= 5 and state.get("rep") != time.strftime("%Y-%m-%d", gm):
+                if tg.send("📋 <b>تقرير اليوم</b>\n" + health_text(state, tg, MS, cfg.get("displayTz", "Asia/Hebron")), silent=True, private=True):
+                    state["rep"] = time.strftime("%Y-%m-%d", gm); dirty = True
             save_state(state)
             if dirty or time.time() - last_commit >= 1800:             # + حفظ دوري كل 30 دقيقة ولو بلا رسائل
                 commit_state(); last_commit = time.time()

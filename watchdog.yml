@@ -1,0 +1,109 @@
+name: SH watchdog
+
+# حارس مستقل: يراقب بوت SH من خارجه. إن لم تُحفظ حالة MSNR منذ 40 دقيقة والسوق مفتوح (جولة معلّقة أو متوقفة)
+# يلغي الجولة المعلّقة ويشغّل جولة جديدة ويُخبر صاحب البوت. يحمي من 3 إعادات تشغيل كحد أقصى خلال 6 ساعات.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "تشخيص فقط بلا أي إجراء"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: sh-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check and heal
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          DRY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry }}
+        run: |
+          python3 - <<'PY'
+          import datetime as dt, json, os, time, urllib.request, urllib.parse
+
+          REPO = os.environ["REPO"]; TOK = os.environ["GH_TOKEN"]; DRY = os.environ.get("DRY") == "true"
+          NOW = dt.datetime.now(dt.timezone.utc)
+
+          def api(path, method="GET", data=None, raw=False):
+              req = urllib.request.Request("https://api.github.com" + path, method=method, data=(json.dumps(data).encode() if data is not None else None),
+                                           headers={"Authorization": "Bearer " + TOK, "Accept": "application/vnd.github.raw" if raw else "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  body = r.read().decode("utf-8")
+              return (body if raw else (json.loads(body) if body else {}))
+
+          def ts(s):
+              return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+          # 1) هل السوق مفتوح؟ (الذهب: الأحد 22:00 UTC ← الجمعة 21:00، واستراحة يومية 21:00–22:00) ومنذ متى فُتح
+          wd = NOW.weekday(); h = NOW.hour + NOW.minute / 60
+          closed = (wd == 4 and h >= 21) or wd == 5 or (wd == 6 and h < 22) or (21 <= h < 22)
+          if closed:
+              print("السوق مغلق: لا فحص"); raise SystemExit(0)
+          open_t = NOW.replace(hour=22, minute=0, second=0, microsecond=0)
+          if open_t > NOW:
+              open_t -= dt.timedelta(days=1)
+          since_open = (NOW - open_t).total_seconds() / 60
+          if since_open < 50:
+              print(f"السوق فُتح قبل {since_open:.0f} دقيقة فقط: مهلة"); raise SystemExit(0)
+
+          # 2) عمر آخر حفظ لحالة MSNR
+          c = api(f"/repos/{REPO}/commits?path=msnr_state.json&per_page=1")
+          age = (NOW - ts(c[0]["commit"]["committer"]["date"])).total_seconds() / 60 if c else 9999
+          runs = [r for r in api(f"/repos/{REPO}/actions/runs?status=in_progress&per_page=20")["workflow_runs"] if r["name"] == "SH bot"]
+          print(f"آخر حفظ قبل {age:.0f} دقيقة | جولات SH الجارية: {[(r['run_number'], r['event']) for r in runs]}")
+          if age < 40:
+              print("سليم"); raise SystemExit(0)
+
+          # 3) سقف الإجراءات: 3 إعادات تشغيل خلال 6 ساعات (يمنع عاصفة إعادات في العطل/الإغلاقات الاستثنائية)
+          recent = [r for r in api(f"/repos/{REPO}/actions/workflows/sh.yml/runs?event=workflow_dispatch&per_page=15")["workflow_runs"] if (NOW - ts(r["created_at"])).total_seconds() < 6 * 3600]
+          if len(recent) >= 4:
+              print("بلغنا سقف إعادات التشغيل؛ لا إجراء"); raise SystemExit(0)
+
+          msg = f"🛠 الحارس المستقل: لا حفظ لحالة البوت منذ {age:.0f} دقيقة والسوق مفتوح. "
+          if DRY:
+              print("DRY: كان سيُلغي الجولات المعلّقة ويشغّل جديدة"); raise SystemExit(0)
+          # 4) إلغاء الجولة المعلّقة (عادي ثم بالقوة) ثم تشغيل جولة جديدة
+          for r in runs:
+              if (NOW - ts(r["run_started_at"])).total_seconds() > 15 * 60:
+                  try:
+                      api(f"/repos/{REPO}/actions/runs/{r['id']}/cancel", "POST", {})
+                  except Exception as ex:
+                      print("cancel:", ex)
+          time.sleep(45)
+          for r in api(f"/repos/{REPO}/actions/runs?status=in_progress&per_page=20")["workflow_runs"]:
+              if r["name"] == "SH bot" and (NOW - ts(r["run_started_at"])).total_seconds() > 15 * 60:
+                  try:
+                      api(f"/repos/{REPO}/actions/runs/{r['id']}/force-cancel", "POST", {})
+                  except Exception as ex:
+                      print("force-cancel:", ex)
+          time.sleep(10)
+          try:
+              api(f"/repos/{REPO}/actions/workflows/sh.yml/dispatches", "POST", {"ref": "main", "inputs": {"test": "false"}})
+              msg += "ألغيت الجولة المعلّقة وشغّلت جولة جديدة."
+          except Exception as ex:
+              msg += f"تعذّر تشغيل جولة جديدة: {ex}"
+          print(msg)
+          # 5) إخبار صاحب البوت (الخاص)
+          try:
+              cfg = json.loads(api(f"/repos/{REPO}/contents/sh_config.json?ref=main", raw=True))
+              tk = os.environ.get("TELEGRAM_TOKEN", "").strip()
+              if tk and cfg.get("chatId"):
+                  data = urllib.parse.urlencode({"chat_id": cfg["chatId"], "text": msg}).encode()
+                  urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tk}/sendMessage", data=data), timeout=20)
+          except Exception as ex:
+              print("telegram:", ex)
+          PY
