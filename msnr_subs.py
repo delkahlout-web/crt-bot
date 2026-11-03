@@ -333,7 +333,7 @@ class Broadcast:
         try:
             self._set_menu()
             r = requests.get(self.base + "/getUpdates", params={"offset": int(self.state.get("upd", 0)) + 1, "timeout": 0,
-                                                                "allowed_updates": json.dumps(["message", "callback_query"])}, timeout=8)
+                                                                "allowed_updates": json.dumps(["message", "callback_query", "message_reaction"])}, timeout=8)
             if not r.ok:
                 return
             for u in r.json().get("result", []):
@@ -341,6 +341,9 @@ class Broadcast:
                 cb = u.get("callback_query")
                 if cb:
                     self._on_callback(cb); continue
+                mr = u.get("message_reaction")
+                if mr:
+                    self._on_reaction(mr); continue
                 m = u.get("message") or {}
                 text = (m.get("text") or "").strip()
                 chat = m.get("chat") or {}; frm = m.get("from") or {}
@@ -395,6 +398,24 @@ class Broadcast:
                     self._post(cid, "✅ مشترك — الرسائل تصلك لحظياً." if (cid in self.subs or cid == str(self.chat_id)) else "غير مشترك — أرسل /start.")
         except Exception as ex:
             self.log(f"poll: {ex}")
+
+    def _on_reaction(self, mr):
+        """تفاعل مشترك (إيموجي) على رسالة من البوت: إشعار صامت لصاحب البوت، وعدّاد يومي."""
+        try:
+            cid = str((mr.get("chat") or {}).get("id"))
+            if cid == str(self.chat_id):
+                return
+            new = [r.get("emoji") or "⭐" for r in mr.get("new_reaction", []) if r.get("type") == "emoji" or r.get("emoji") or r.get("type") == "custom_emoji"]
+            old = [r.get("emoji") or "⭐" for r in mr.get("old_reaction", [])]
+            added = [e for e in new if e not in old]
+            if not added:
+                return
+            u = mr.get("user") or {}
+            name = (self.subs.get(cid) or {}).get("n") or u.get("first_name") or u.get("username") or cid
+            self.bump("reacts")
+            self._post(self.chat_id, f"{''.join(added)}  <b>{html.escape(str(name))}</b> تفاعل مع إحدى رسائل البوت", silent=True)
+        except Exception as ex:
+            self.log(f"تفاعل: {ex}")
 
     def _on_callback(self, cb):
         """ضغطة زر من لوحة /users (لصاحب البوت فقط)."""
