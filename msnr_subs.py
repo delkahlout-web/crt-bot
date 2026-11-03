@@ -193,7 +193,6 @@ class Broadcast:
     def _card(self, x, head, note=""):
         """بطاقة التوصية: سطر ضياء، ثم الدخول والوقف والهدف (أسعار قابلة للنسخ بلمسة) وشريط المسافة."""
         buy = x["s"] == 1
-        a = max(2, min(12, round(x["sl"] / (x["sl"] + x["tp"]) * 14))); b = max(2, 14 - a)
         kind = "" if x["st"] == "open" else f"\n📌 نوع الأمر: <b>{x['pt']}</b>  ·  يتفعّل عند <code>{x['e']:.2f}</code>"
         return (f"{head}\n\n"
                 f"{'🟢' if buy else '🔴'} <b>XAUUSD</b>  ·  {'شراء ▲' if buy else 'بيع ▼'}{kind}\n"
@@ -201,11 +200,7 @@ class Broadcast:
                 f"📍 الدخول    <code>{x['e']:.2f}</code>\n"
                 f"🛑 الوقف     <code>{x['slp']:.2f}</code>   ‹ {x['sl']:g} نقطة ›\n"
                 f"🎯 الهدف     <code>{x['tpp']:.2f}</code>   ‹ {x['tp']:g} نقطة ›\n"
-                f"┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
-                f"🛑 {'▰' * a} 📍 {'▰' * b} 🎯\n"
-                f"⚖️ 1 : {x['tp'] / x['sl']:.1f}   ·   🕒 {self._tm()}"
-                f"{note}\n"
-                f"<i>الأسعار فورية وقد تختلف قليلًا عن وسيطك؛ التزم بالوقف. ليست نصيحة مالية.</i>")
+                f"┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈{note}")
 
     def _trade(self, cid, side, a, b, c=None, test=False):
         """«1 60 120» = شراء الآن بوقف 60 وهدف 120 نقطة · «1 3920 60 120» = أمر معلّق عند 3920. «ت» في أولها = تجربة لك وحدك."""
@@ -286,15 +281,13 @@ class Broadcast:
                 if not (win or loss):
                     continue
                 tr.remove(x); self.dirty = True
-                dur = (t - x.get("ot", x["t0"])) / 60
-                dtxt = f"{dur / 60:.1f} س" if dur >= 90 else f"{dur:.0f} د"
                 hist = self.state.setdefault("mhist", []); hist.append(dict(s=x["s"], e=x["e"], r="tp" if win else "sl", t=int(t))); del hist[:-30]
                 if win:
                     self.send(self._say("مبروك الهدف! 🎉🏆") + f"\n\n✅ <b>تحقق الهدف  +{x['tp']:g} نقطة</b>  ({x['tp'] * pip:+.1f}$)\n"
-                              f"📍 <code>{x['e']:.2f}</code>  ←  🎯 <code>{x['tpp']:.2f}</code>\n⏱ استغرقت {dtxt}  ·  🕒 {self._tm()}")
+                              f"📍 <code>{x['e']:.2f}</code>  ←  🎯 <code>{x['tpp']:.2f}</code>")
                 else:
                     self.send(self._say("ولا يهمكم الستوب، بنعوّض إن شاء الله 💪") + f"\n\n🛑 ضُرب الوقف  −{x['sl']:g} نقطة  ({-x['sl'] * pip:+.1f}$)\n"
-                              f"📍 <code>{x['e']:.2f}</code>  ←  🛑 <code>{x['slp']:.2f}</code>\n⏱ {dtxt}  ·  🕒 {self._tm()}\n<i>الالتزام بالوقف جزء من الخطة؛ الفرصة القادمة أقرب.</i>")
+                              f"📍 <code>{x['e']:.2f}</code>  ←  🛑 <code>{x['slp']:.2f}</code>")
                 break
 
     def _set_menu(self):
