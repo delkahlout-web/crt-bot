@@ -3,7 +3,7 @@
   "alertPts": 50,
   "rearmPts": 100,
   "cooldownMin": 30,
-  "maxAlertsPerDay": 15,
+  "maxAlertsPerDay": 1000,
   "snapshotHours": 0,
   "levelAlerts": true,
   "planAlerts": true,
