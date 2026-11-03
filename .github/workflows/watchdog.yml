@@ -49,14 +49,16 @@ jobs:
               return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
 
           # 1) هل السوق مفتوح؟ (الذهب: الأحد 22:00 UTC ← الجمعة 21:00، واستراحة يومية 21:00–22:00) ومنذ متى فُتح
-          wd = NOW.weekday(); h = NOW.hour + NOW.minute / 60
-          closed = (wd == 4 and h >= 21) or wd == 5 or (wd == 6 and h < 22) or (21 <= h < 22)
+          from zoneinfo import ZoneInfo          # إغلاق الذهب اليومي 17:00–18:00 بتوقيت نيويورك (يتغيّر مع التوقيت الصيفي)
+          ny = NOW.astimezone(ZoneInfo("America/New_York"))
+          wd = ny.weekday(); h = ny.hour + ny.minute / 60
+          closed = (wd == 4 and h >= 17) or wd == 5 or (wd == 6 and h < 18) or (17 <= h < 18)
           if closed:
               print("السوق مغلق: لا فحص"); raise SystemExit(0)
-          open_t = NOW.replace(hour=22, minute=0, second=0, microsecond=0)
-          if open_t > NOW:
+          open_t = ny.replace(hour=18, minute=0, second=0, microsecond=0)
+          if open_t > ny:
               open_t -= dt.timedelta(days=1)
-          since_open = (NOW - open_t).total_seconds() / 60
+          since_open = (ny - open_t).total_seconds() / 60
           if since_open < 50:
               print(f"السوق فُتح قبل {since_open:.0f} دقيقة فقط: مهلة"); raise SystemExit(0)
 
