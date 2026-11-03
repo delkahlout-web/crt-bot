@@ -33,10 +33,13 @@ OWNER_HELP = ("🛠 <b>لوحة التحكم</b>\n┄┄┄┄┄┄┄┄┄┄
               "<code>ت 1 60 120</code> — تجربة تصلك وحدك بلا إرسال لأحد\n"
               "<code>الغاء</code> — إلغاء آخر أمر معلّق · <code>اغلاق</code> — إغلاق آخر صفقة بالسعر الآن\n"
               "الهدف والوقف يُتابَعان تلقائيًا ويصل «مبروك» أو «بنعوّض» للجميع.\n"
+              "✍️ أي رسالة عادية تكتبها هنا (نص أو صورة أو صوت) تصل لكل المشتركين فورًا.\n"
               "/map — خريطة المناطق\n/health — حالة النظام الآن")
 _N = r"(\d+(?:\.\d+)?)"; _SEP = r"\s*[\s,،/]+\s*"
 _TRADE = re.compile(rf"^\s*(ت|تجربة|t|test)?\s*[:\-]?\s*([12]){_SEP}{_N}{_SEP}{_N}(?:{_SEP}{_N})?\s*$", re.I)
 _TCMD = re.compile(r"^\s*(الغاء|إلغاء|اغلاق|إغلاق)\s*$")
+_TRYTRADE = re.compile(r"^\s*(ت|تجربة|t|test)?\s*[:\-]?\s*[12]\b[\d\s.,،/]*$", re.I)
+_CONTENT = ("text", "photo", "video", "voice", "audio", "document", "sticker", "animation", "video_note", "location", "poll", "contact")
 _DIG = str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
 
 
@@ -105,6 +108,33 @@ class Broadcast:
             except Exception:
                 pass
             time.sleep(1.5 * (attempt + 1))
+
+    def _copy_one(self, cid, mid):
+        """ينسخ رسالة صاحب البوت كما هي (نص منسّق أو صورة أو صوت...) إلى مشترك."""
+        for attempt in range(3):
+            try:
+                r = self._api("copyMessage", chat_id=cid, from_chat_id=self.chat_id, message_id=mid)
+                if r.ok:
+                    return
+                if r.status_code == 429:
+                    time.sleep(float(r.json().get("parameters", {}).get("retry_after", 2)) + 0.5); continue
+                if r.status_code in (400, 403) and any(w in r.text.lower() for w in ("blocked", "chat not found", "deactivated", "kicked", "not a member")):
+                    with self._lock:
+                        self.subs.pop(cid, None); self.dirty = True
+                    self.log(f"حُذف مشترك: {cid}")
+                    return
+            except Exception:
+                pass
+            time.sleep(1.5 * (attempt + 1))
+
+    def _relay(self, mid):
+        """أي رسالة عادية يكتبها صاحب البوت في محادثته (بلا أمر) تصل لكل المشتركين."""
+        subs = [c for c in list(self.subs) if c != str(self.chat_id)]
+        for cid in subs:
+            threading.Thread(target=self._copy_one, args=(cid, mid), daemon=True).start()
+        self.bump("msgs")
+        self._post(self.chat_id, f"✅ أُرسلت لـ {len(subs)} مشترك", silent=True)
+        self.log(f"رسالة حرّة من صاحب البوت إلى {len(subs)} مشترك")
 
     # ───────────── لوحة صاحب البوت ─────────────
     def _label(self, cid, v):
@@ -323,6 +353,12 @@ class Broadcast:
                     mc = _TCMD.match(text)
                     if mc:
                         self._trade_cmd(str(chat.get("id")), mc.group(1))
+                        continue
+                    if not text.startswith("/") and any(k in m for k in _CONTENT):
+                        if _TRYTRADE.match(text.translate(_DIG)):                 # يشبه توصية لكن ناقصة الأرقام: لا تُرسل كنص للمشتركين
+                            self._post(str(chat.get("id")), "⚠️ لم أفهم الأرقام فلم أرسل شيئًا. الصيغة: <code>1 60 120</code> أو معلّق <code>1 3920 60 120</code>")
+                        else:
+                            self._relay(m.get("message_id"))
                         continue
                 if not text.startswith("/") or frm.get("is_bot"):
                     continue
