@@ -8,6 +8,7 @@
 """
 import html
 import json
+import re
 import threading
 import time
 
@@ -25,7 +26,12 @@ OWNER_HELP = ("🛠 <b>لوحة التحكم</b>\n┄┄┄┄┄┄┄┄┄┄
               "<code>/ban رقم_أو_@اسم</code> — حظر (لا يستطيع الاشتراك)\n"
               "<code>/unban رقم_أو_@اسم</code> — فك الحظر\n"
               "<code>/say نص</code> — رسالة لكل المشتركين\n"
+              "<code>1 وقف هدف</code> — شراء الذهب الآن للجميع، مثال: <code>1 60 120</code>\n"
+              "<code>2 وقف هدف</code> — بيع الذهب الآن للجميع، مثال: <code>2 60 120</code>\n"
+              "(الوقف والهدف بالنقاط، والنقطة = 0.1$؛ اكتبها مباشرة بلا أمر)\n"
               "/map — خريطة المناطق\n/health — حالة النظام الآن")
+_TRADE = re.compile(r"^\s*([12])\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*$")
+_DIG = str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
 
 
 def _ago(t):
@@ -42,6 +48,7 @@ class Broadcast:
         self.dirty = False
         self.handlers = {}                                           # أوامر إضافية: {"/map": دالة تعيد النص}
         self.owner_handlers = {}                                     # أوامر لصاحب البوت فقط: {"/health": دالة}
+        self.trade_handler = None                                    # دالة (side, وقف, هدف) ← نص التوصية؛ تُفعَّل بكتابة «1 60 120» مباشرة من صاحب البوت
         self.base = tg.base; self.token = tg.token; self.chat_id = tg.chat_id
         self._lock = threading.Lock(); self._menu = False
 
@@ -166,6 +173,22 @@ class Broadcast:
             return False
         return True
 
+    def _trade(self, cid, side, sl, tp):
+        """توصية فورية من صاحب البوت: 1 = شراء، 2 = بيع، ثم وقف وهدف بالنقاط. تصل لكل المشتركين وله."""
+        if not (0 < sl <= 2000 and 0 < tp <= 5000):
+            self._post(cid, "⚠️ الوقف أو الهدف خارج المدى المعقول. أعد الكتابة، مثال: <code>1 60 120</code>")
+            return
+        try:
+            text = self.trade_handler(side, sl, tp)
+        except Exception as ex:
+            self.log(f"توصية: {ex}"); self._post(cid, f"تعذّر: {ex}"); return
+        if not text:
+            self._post(cid, "⚠️ لا يوجد سعر حديث الآن، لم يُرسل شيء. أعد المحاولة بعد لحظات.")
+            return
+        self.send(text)
+        self._post(cid, f"✅ أُرسلت التوصية لـ {len([c for c in self.subs if c != str(self.chat_id)])} مشترك", silent=True)
+        self.log(f"توصية يدوية: {'شراء' if side == 1 else 'بيع'} وقف {sl:g} هدف {tp:g}")
+
     def _set_menu(self):
         """قائمة الأوامر (زر / في تلجرام): عامة للجميع، وإضافية لصاحب البوت في محادثته."""
         if self._menu:
@@ -198,6 +221,11 @@ class Broadcast:
                 m = u.get("message") or {}
                 text = (m.get("text") or "").strip()
                 chat = m.get("chat") or {}; frm = m.get("from") or {}
+                if self.trade_handler and not frm.get("is_bot") and str(chat.get("id")) == str(self.chat_id) and str(frm.get("id")) == str(self.chat_id):
+                    mt = _TRADE.match(text.translate(_DIG))
+                    if mt:
+                        self._trade(str(chat.get("id")), int(mt.group(1)), float(mt.group(2)), float(mt.group(3)))
+                        continue
                 if not text.startswith("/") or frm.get("is_bot"):
                     continue
                 cid = str(chat.get("id")); name = chat.get("title") or frm.get("first_name") or chat.get("first_name") or chat.get("username") or ""

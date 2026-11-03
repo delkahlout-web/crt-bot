@@ -473,7 +473,29 @@ def main():
         tg.handlers["/map"] = map_reply; tg.handlers["/levels"] = map_reply
         tg.owner_handlers["/health"] = lambda: health_text(state, tg, MS, cfg.get("displayTz", "Asia/Hebron"))
         tg.bump("starts")
-    yh1 = {"t": 0, "bars": []}
+
+        def manual_trade(side, sl, tp):
+            """توصية يدوية بالسعر الفوري الآن؛ لا ترسل إن كان السعر أقدم من 60 ثانية."""
+            if not (SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 60):
+                return None
+            px = SPOT_BUF[-1][1]; pip = 0.1
+            buy = side == 1
+            slp = px - sl * pip if buy else px + sl * pip
+            tpp = px + tp * pip if buy else px - tp * pip
+            from sh_messages import fmt_time
+            tz = cfg.get("displayTz", "Asia/Hebron")
+            rr = tp / sl
+            return (f"{'🟢' if buy else '🔴'} <b>{'شراء' if buy else 'بيع'} الذهب الآن</b>  ·  XAUUSD\n"
+                    f"▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n"
+                    f"📍 الدخول: <b>{px:.2f}</b>  (السعر الحالي)\n"
+                    f"🛑 وقف الخسارة: <b>{slp:.2f}</b>  ({sl:g} نقطة · {sl * pip:.1f}$)\n"
+                    f"🎯 الهدف: <b>{tpp:.2f}</b>  ({tp:g} نقطة · {tp * pip:.1f}$)\n"
+                    f"⚖️ العائد إلى المخاطرة: 1 : {rr:.1f}\n"
+                    f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+                    f"🕒 {fmt_time(time.time(), tz)}\n"
+                    f"<i>الدخول بالسعر الفوري وقد يختلف عن سعر وسيطك قليلًا؛ التزم بالوقف وإدارة المخاطرة. ليست نصيحة مالية.</i>")
+        tg.trade_handler = manual_trade
+    yh1 ={"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
     errs = 0; last_chk = time.time(); ms_err = 0; fast_err = 0; last_bnd = int(time.time()) // 300; last_commit = time.time()
