@@ -29,9 +29,14 @@ OWNER_HELP = ("🛠 <b>لوحة التحكم</b>\n┄┄┄┄┄┄┄┄┄┄
               "<code>1 وقف هدف</code> — شراء الذهب الآن للجميع، مثال: <code>1 60 120</code>\n"
               "<code>2 وقف هدف</code> — بيع الذهب الآن للجميع، مثال: <code>2 60 120</code>\n"
               "(الوقف والهدف بالنقاط، والنقطة = 0.1$؛ اكتبها مباشرة بلا أمر)\n"
+              "<code>1 3920 60 120</code> — أمر معلّق عند 3920 (يُبلَّغون عند تفعيله)\n"
               "<code>ت 1 60 120</code> — تجربة تصلك وحدك بلا إرسال لأحد\n"
+              "<code>الغاء</code> — إلغاء آخر أمر معلّق · <code>اغلاق</code> — إغلاق آخر صفقة بالسعر الآن\n"
+              "الهدف والوقف يُتابَعان تلقائيًا ويصل «مبروك» أو «بنعوّض» للجميع.\n"
               "/map — خريطة المناطق\n/health — حالة النظام الآن")
-_TRADE = re.compile(r"^\s*(ت|تجربة|t|test)?\s*[:\-]?\s*([12])\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*$", re.I)
+_N = r"(\d+(?:\.\d+)?)"; _SEP = r"\s*[\s,،/]+\s*"
+_TRADE = re.compile(rf"^\s*(ت|تجربة|t|test)?\s*[:\-]?\s*([12]){_SEP}{_N}{_SEP}{_N}(?:{_SEP}{_N})?\s*$", re.I)
+_TCMD = re.compile(r"^\s*(الغاء|إلغاء|اغلاق|إغلاق)\s*$")
 _DIG = str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
 
 
@@ -49,7 +54,9 @@ class Broadcast:
         self.dirty = False
         self.handlers = {}                                           # أوامر إضافية: {"/map": دالة تعيد النص}
         self.owner_handlers = {}                                     # أوامر لصاحب البوت فقط: {"/health": دالة}
-        self.trade_handler = None                                    # دالة (side, وقف, هدف) ← نص التوصية؛ تُفعَّل بكتابة «1 60 120» مباشرة من صاحب البوت
+        self.price_fn = None                                         # دالة ← (السعر الفوري, وقته)؛ تُفعِّل التوصيات اليدوية «1 60 120» من صاحب البوت مباشرة
+        self.tz = "Asia/Hebron"
+        state.setdefault("mtr", [])
         self.base = tg.base; self.token = tg.token; self.chat_id = tg.chat_id
         self._lock = threading.Lock(); self._menu = False
 
@@ -174,24 +181,121 @@ class Broadcast:
             return False
         return True
 
-    def _trade(self, cid, side, sl, tp, test=False):
-        """توصية فورية من صاحب البوت: 1 = شراء، 2 = بيع، ثم وقف وهدف بالنقاط. تصل لكل المشتركين وله."""
-        if not (0 < sl <= 2000 and 0 < tp <= 5000):
-            self._post(cid, "⚠️ الوقف أو الهدف خارج المدى المعقول. أعد الكتابة، مثال: <code>1 60 120</code>")
+    # ───────────── توصيات يدوية من صاحب البوت (1 = شراء، 2 = بيع) مع متابعة تلقائية للوقف والهدف ─────────────
+    def _tm(self):
+        from sh_messages import fmt_time
+        return fmt_time(time.time(), self.tz)
+
+    @staticmethod
+    def _say(line):
+        return f"<blockquote>🗣 <b>ضياء بقول لكم:</b>\n{line}</blockquote>"
+
+    def _card(self, x, head, note=""):
+        """بطاقة التوصية: سطر ضياء، ثم الدخول والوقف والهدف (أسعار قابلة للنسخ بلمسة) وشريط المسافة."""
+        buy = x["s"] == 1
+        a = max(2, min(12, round(x["sl"] / (x["sl"] + x["tp"]) * 14))); b = max(2, 14 - a)
+        kind = "" if x["st"] == "open" else f"\n📌 نوع الأمر: <b>{x['pt']}</b>  ·  يتفعّل عند <code>{x['e']:.2f}</code>"
+        return (f"{head}\n\n"
+                f"{'🟢' if buy else '🔴'} <b>XAUUSD</b>  ·  {'شراء ▲' if buy else 'بيع ▼'}{kind}\n"
+                f"┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
+                f"📍 الدخول    <code>{x['e']:.2f}</code>\n"
+                f"🛑 الوقف     <code>{x['slp']:.2f}</code>   ‹ {x['sl']:g} نقطة ›\n"
+                f"🎯 الهدف     <code>{x['tpp']:.2f}</code>   ‹ {x['tp']:g} نقطة ›\n"
+                f"┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
+                f"🛑 {'▰' * a} 📍 {'▰' * b} 🎯\n"
+                f"⚖️ 1 : {x['tp'] / x['sl']:.1f}   ·   🕒 {self._tm()}"
+                f"{note}\n"
+                f"<i>الأسعار فورية وقد تختلف قليلًا عن وسيطك؛ التزم بالوقف. ليست نصيحة مالية.</i>")
+
+    def _trade(self, cid, side, a, b, c=None, test=False):
+        """«1 60 120» = شراء الآن بوقف 60 وهدف 120 نقطة · «1 3920 60 120» = أمر معلّق عند 3920. «ت» في أولها = تجربة لك وحدك."""
+        entry, sl, tp = (None, a, b) if c is None else (a, b, c)
+        if not (0 < sl <= 2000 and 0 < tp <= 5000) or (entry is not None and not 500 < entry < 20000):
+            self._post(cid, "⚠️ الأرقام خارج المدى المعقول. مثال: <code>1 60 120</code> أو أمر معلّق: <code>1 3920 60 120</code>")
             return
-        try:
-            text = self.trade_handler(side, sl, tp)
-        except Exception as ex:
-            self.log(f"توصية: {ex}"); self._post(cid, f"تعذّر: {ex}"); return
-        if not text:
+        pr = self.price_fn() if self.price_fn else None
+        if not pr or time.time() - pr[1] > 60:
             self._post(cid, "⚠️ لا يوجد سعر حديث الآن، لم يُرسل شيء. أعد المحاولة بعد لحظات.")
             return
+        px, pt = pr; pip = 0.1; buy = side == 1
+        if not test and len(self.state.setdefault("mtr", [])) >= 5:
+            self._post(cid, "⚠️ عندك 5 توصيات قيد المتابعة. اكتب <code>الغاء</code> أو <code>اغلاق</code> أولًا.")
+            return
+        e = px if entry is None else entry
+        x = dict(id=int(time.time()), s=side, e=e, sl=sl, tp=tp, slp=e - sl * pip if buy else e + sl * pip, tpp=e + tp * pip if buy else e - tp * pip,
+                 st="open" if entry is None else "pending", lt=time.time(), t0=time.time(),
+                 pt=("Buy Limit" if e < px else "Buy Stop") if buy else ("Sell Limit" if e > px else "Sell Stop"))
+        act = "نشتري" if buy else "نبيع"
+        if x["st"] == "pending" and x["pt"] in ("Buy Limit", "Sell Limit") and ((px >= x["tpp"]) if buy else (px <= x["tpp"])):
+            self._post(cid, f"⚠️ السعر الحالي {px:.2f} تجاوز هدف هذا الأمر ({x['tpp']:.2f}) أصلًا. راجع الأرقام.")
+            return
+        if x["st"] == "open":
+            head = self._say(f"{act} الذهب الآن {'🟢' if buy else '🔴'}")
+            text = self._card(x, head)
+        else:
+            head = self._say(f"أمر معلّق — {act} الذهب عند <b>{e:.2f}</b> {'🟢' if buy else '🔴'}")
+            text = self._card(x, head, f"\n💲 السعر الآن <code>{px:.2f}</code> — نخبركم لحظة تفعيل الأمر")
         if test:
             self._post(cid, "🧪 <b>تجربة — وصلتك وحدك ولم تُرسل لأحد</b>\n\n" + text)
             return
+        self.state["mtr"].append(x); self.dirty = True
         self.send(text)
-        self._post(cid, f"✅ أُرسلت التوصية لـ {len([c for c in self.subs if c != str(self.chat_id)])} مشترك", silent=True)
-        self.log(f"توصية يدوية: {'شراء' if side == 1 else 'بيع'} وقف {sl:g} هدف {tp:g}")
+        self._post(cid, f"✅ أُرسلت لـ {len([c for c in self.subs if c != str(self.chat_id)])} مشترك · أتابع الوقف والهدف تلقائيًا", silent=True)
+        self.log(f"توصية يدوية: {'شراء' if buy else 'بيع'} {x['st']} @ {e:.2f} وقف {sl:g} هدف {tp:g}")
+
+    def _trade_cmd(self, cid, word):
+        """«الغاء» يلغي آخر أمر معلّق، و«اغلاق» يغلق آخر صفقة مفتوحة بالسعر الآن، ويُعلَم المشتركون."""
+        tr = self.state.setdefault("mtr", [])
+        cancel = word in ("الغاء", "إلغاء")
+        x = next((t for t in reversed(tr) if t["st"] == ("pending" if cancel else "open")), None)
+        if not x:
+            self._post(cid, "لا يوجد أمر معلّق الآن." if cancel else "لا توجد صفقة مفتوحة الآن.")
+            return
+        pr = self.price_fn() if self.price_fn else None
+        tr.remove(x); self.dirty = True
+        if cancel:
+            self.send(self._say("ألغينا الأمر المعلّق، ما بتم تفعيله ✋") + f"\n\n{'🟢' if x['s'] == 1 else '🔴'} {x['pt']} عند <code>{x['e']:.2f}</code>\n🕒 {self._tm()}")
+        else:
+            if not pr:
+                self._post(cid, "⚠️ لا يوجد سعر حديث الآن. أعد المحاولة."); tr.append(x); return
+            pts = (pr[0] - x["e"]) / 0.1 * (1 if x["s"] == 1 else -1)
+            self.send(self._say(f"أغلقنا الصفقة الآن {'✅' if pts >= 0 else '🤝'}") + f"\n\n📍 الدخول <code>{x['e']:.2f}</code>  ←  🚪 الإغلاق <code>{pr[0]:.2f}</code>\n"
+                      f"{'📈' if pts >= 0 else '📉'} النتيجة: <b>{pts:+.0f} نقطة</b> ({pts * 0.1:+.1f}$)\n🕒 {self._tm()}")
+        self._post(cid, "✅ تم وأُعلم المشتركون", silent=True)
+
+    def track(self, buf):
+        """يتابع كل توصية بعيّنات السعر الفوري: تفعيل الأمر المعلّق، ثم الهدف (مبروك) أو الوقف (بنعوّض)، ويُعلم الجميع لحظتها."""
+        tr = self.state.get("mtr")
+        if not tr or not buf:
+            return
+        for x in list(tr):
+            for t, p in [s for s in buf if s[0] > x["lt"]]:
+                x["lt"] = t; buy = x["s"] == 1; pip = 0.1
+                if x["st"] == "pending":
+                    hit = (p <= x["e"] if x["pt"] == "Buy Limit" else p >= x["e"] if x["pt"] == "Buy Stop" else p >= x["e"] if x["pt"] == "Sell Limit" else p <= x["e"])
+                    miss = x["pt"] in ("Buy Limit", "Sell Limit") and ((p >= x["tpp"]) if buy else (p <= x["tpp"]))
+                    if miss:
+                        tr.remove(x); self.dirty = True
+                        self.send(self._say("ألغينا الأمر المعلّق: السعر وصل الهدف قبل أن يتفعّل ✋") + f"\n\n🕒 {self._tm()}")
+                        break
+                    if hit:
+                        x["st"] = "open"; x["ot"] = t; self.dirty = True
+                        self.send(self._say(f"تفعّل الأمر المعلّق، {'اشترينا' if buy else 'بعنا'} الذهب ⚡") + f"\n\n📍 الدخول <code>{x['e']:.2f}</code>   🛑 <code>{x['slp']:.2f}</code>   🎯 <code>{x['tpp']:.2f}</code>\n🕒 {self._tm()}")
+                    continue
+                win = (p >= x["tpp"]) if buy else (p <= x["tpp"]); loss = (p <= x["slp"]) if buy else (p >= x["slp"])
+                if not (win or loss):
+                    continue
+                tr.remove(x); self.dirty = True
+                dur = (t - x.get("ot", x["t0"])) / 60
+                dtxt = f"{dur / 60:.1f} س" if dur >= 90 else f"{dur:.0f} د"
+                hist = self.state.setdefault("mhist", []); hist.append(dict(s=x["s"], e=x["e"], r="tp" if win else "sl", t=int(t))); del hist[:-30]
+                if win:
+                    self.send(self._say("مبروك الهدف! 🎉🏆") + f"\n\n✅ <b>تحقق الهدف  +{x['tp']:g} نقطة</b>  ({x['tp'] * pip:+.1f}$)\n"
+                              f"📍 <code>{x['e']:.2f}</code>  ←  🎯 <code>{x['tpp']:.2f}</code>\n⏱ استغرقت {dtxt}  ·  🕒 {self._tm()}")
+                else:
+                    self.send(self._say("ولا يهمكم الستوب، بنعوّض إن شاء الله 💪") + f"\n\n🛑 ضُرب الوقف  −{x['sl']:g} نقطة  ({-x['sl'] * pip:+.1f}$)\n"
+                              f"📍 <code>{x['e']:.2f}</code>  ←  🛑 <code>{x['slp']:.2f}</code>\n⏱ {dtxt}  ·  🕒 {self._tm()}\n<i>الالتزام بالوقف جزء من الخطة؛ الفرصة القادمة أقرب.</i>")
+                break
 
     def _set_menu(self):
         """قائمة الأوامر (زر / في تلجرام): عامة للجميع، وإضافية لصاحب البوت في محادثته."""
@@ -225,10 +329,15 @@ class Broadcast:
                 m = u.get("message") or {}
                 text = (m.get("text") or "").strip()
                 chat = m.get("chat") or {}; frm = m.get("from") or {}
-                if self.trade_handler and not frm.get("is_bot") and str(chat.get("id")) == str(self.chat_id) and str(frm.get("id")) == str(self.chat_id):
+                if self.price_fn and not frm.get("is_bot") and str(chat.get("id")) == str(self.chat_id) and str(frm.get("id")) == str(self.chat_id):
                     mt = _TRADE.match(text.translate(_DIG))
                     if mt:
-                        self._trade(str(chat.get("id")), int(mt.group(2)), float(mt.group(3)), float(mt.group(4)), test=bool(mt.group(1)))
+                        c5 = mt.group(5)
+                        self._trade(str(chat.get("id")), int(mt.group(2)), float(mt.group(3)), float(mt.group(4)), float(c5) if c5 else None, test=bool(mt.group(1)))
+                        continue
+                    mc = _TCMD.match(text)
+                    if mc:
+                        self._trade_cmd(str(chat.get("id")), mc.group(1))
                         continue
                 if not text.startswith("/") or frm.get("is_bot"):
                     continue
