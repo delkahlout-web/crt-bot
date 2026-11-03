@@ -154,6 +154,7 @@ class Msnr:
         self.warmed = False
         self.dirty = False
         self._lat = []; self._heal = None
+        self._aud_t = 0; self._aud_bad = 0
         self.P = self.v4.P
         log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} | مستويات v4 + خطة الجلسة | alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
 
@@ -270,6 +271,60 @@ class Msnr:
     def levels(self, chart5, cur, now, force=False):
         return self.v4.shown(cur, now)
 
+    # ───────────── فحص ذاتي دوري صامت ─────────────
+    def audit(self, tg, chart5, cur, lv, now, tz):
+        """يتحقق بصمت أن الشموع كلها مغذّاة للمحركات، وأن المستويات سليمة وقابلة للحفظ، وأن رسائل المستويات والخريطة تُبنى. لا يرسل شيئاً إلا عند خلل يتكرر مرتين متتاليتين."""
+        P = self.v4.P; pip = P["pipSize"]; bad = []; n = 0
+        try:
+            for g in range(6):
+                if not P["tfOn"][g]:
+                    continue
+                cl = self.v4.cl[g]; E = self.v4.E[g]; name = V4M.TFN[g]
+                if not cl:
+                    bad.append(f"{name}: لا شموع"); continue
+                miss = [c for c in cl[-40:] if c["end"] <= self.v4.S["last"] + 300 and c["time"] > self.v4.fed[g]]
+                if miss:
+                    bad.append(f"{name}: {len(miss)} شمعة مغلقة لم تُغذَّ للمحرك")
+                if any(c["high"] < c["low"] or not (c["low"] - 1e-6 <= c["close"] <= c["high"] + 1e-6) for c in cl[-40:]):
+                    bad.append(f"{name}: شمعة غير منطقية")
+                for L in E.lv:
+                    n += 1
+                    if not (L["p"] > 0 and L["r"] in (1, -1) and L["kd"] in (1, 2, 3, 4)) or not (cur * 0.5 < L["p"] < cur * 2):
+                        bad.append(f"{name}: مستوى بقيم غير سليمة {L['p']}"); break
+                if len(E.lv) > 60:
+                    bad.append(f"{name}: عدد المستويات {len(E.lv)} (>60)")
+            for c in lv:
+                if P["chkHide"] and (c["role"] == "support") != (c["price"] < cur):
+                    bad.append(f"مستوى معروض في الجهة الخطأ {c['price']:.2f}")
+            for i, a in enumerate(lv):
+                for b in lv[i + 1:]:
+                    if a["role"] == b["role"] and abs(a["price"] - b["price"]) <= 0.5 * P["mergeGap"] * pip:
+                        bad.append(f"مستويان متداخلان {a['price']:.2f}/{b['price']:.2f}")
+            for x in self.v4.S.get("trk", []):
+                if not (0 <= x.get("g", -1) < 6 and x.get("s") in (1, 2, 3, 5, 9) and x.get("p", 0) > 0):
+                    bad.append("سجل متابعة غير سليم"); break
+            json.dumps(self.v4.dump()); json.dumps(self.plan.dump())               # قابلية الحفظ على GitHub
+            if not (snapshot_text(lv, cur, tz, P) or "").strip():
+                bad.append("تعذّر بناء رسالة المستويات")
+            ml = self.map_levels(cur, now)
+            if not (ml.get("support") or ml.get("resistance")):
+                bad.append("خريطة المناطق فارغة")
+            elif not (MG3.map_text(ml, cur, tz) or "").strip():
+                bad.append("تعذّر بناء رسالة الخريطة")
+        except Exception as ex:
+            bad.append(f"استثناء في الفحص: {type(ex).__name__}: {ex}")
+        self.st["audit"] = dict(t=now, ok=not bad, n=n, lv=len(lv), bad=bad[:6])
+        if not bad:
+            self._aud_bad = 0
+            log(f"فحص ذاتي: سليم ({n} مستوى مسجّل، {len(lv)} معروض)")
+            return
+        self._aud_bad += 1
+        log(f"فحص ذاتي: ملاحظات ({self._aud_bad}): " + " | ".join(bad[:6]))
+        if any("لم تُغذَّ" in x for x in bad) or self._aud_bad >= 2:
+            self._heal = "فحص ذاتي: " + bad[0]                                    # إصلاح ذاتي بإعادة التهيئة من الحالة المحفوظة
+        if self._aud_bad >= 2:
+            tg.send("🔎 <b>الفحص الذاتي</b> وجد ملاحظات متكررة:\n• " + "\n• ".join(bad[:6]) + "\nأعدتُ التهيئة تلقائيًا.", private=True)
+
     # ───────────── الدورة الكاملة (~كل 20 ثانية) ─────────────
     def tick(self, tg, chart5, cur, now, yahoo_h1, basis, tz):
         """يعيد عدد الرسائل المرسلة. لا يرفع استثناءً لخارج الحلقة إلا لتعالجه (إصلاح ذاتي في sh_actions)."""
@@ -308,7 +363,10 @@ class Msnr:
             save_state(self.st)
             return sent
         lv = self.levels(chart5, cur, now)
-        hr3 = (dt.datetime.fromtimestamp(now, dt.timezone.utc) + dt.timedelta(hours=3))
+        if now - self._aud_t >= 1800:                                              # فحص ذاتي صامت كل 30 دقيقة
+            self._aud_t = now
+            self.audit(tg, chart5, cur, lv, now, tz)
+        hr3 =(dt.datetime.fromtimestamp(now, dt.timezone.utc) + dt.timedelta(hours=3))
         mkey = f"{hr3:%Y%m%d}{hr3.hour:02d}"
         if self.cfg.get("mapAlerts", True) and hr3.hour in self.plan.P["sessH"] and self.st.get("mapKey") != mkey and hr3.minute >= 1:
             if tg.send(self.map_reply(cur, tz)):                                   # خريطة المناطق عند فتح كل جلسة 4H

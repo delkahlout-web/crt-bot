@@ -406,6 +406,9 @@ def health_text(state, tg, MS, tz):
             f"🧮 تأخير المعالجة الأخير: {lat}",
             f"👥 مشتركون: {len(state.get('subs', {}))}  ·  محظورون: {len(state.get('banned', {}))}",
             f"🎯 صفقات الجلسة: {pl.get('w', 0)} رابحة / {pl.get('l', 0)} خاسرة"]
+    au = MS.st.get("audit") if MS is not None else None
+    if au:
+        rows.append(f"🔎 آخر فحص ذاتي: قبل {(now - au['t']) / 60:.0f} د — " + ("سليم" if au["ok"] else "ملاحظات: " + " | ".join(au["bad"][:3])) + f"  ({au['n']} مستوى مسجّل)")
     ok = (bar is None or bar < 12) and push < 45 and LAST_PUSH["fail"] == 0
     return "🩺 <b>حالة النظام</b> " + ("🟢 سليم" if ok else "🟠 يحتاج انتباه") + "\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n" + "\n".join(rows)
 
