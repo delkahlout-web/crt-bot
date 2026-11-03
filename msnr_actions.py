@@ -196,12 +196,12 @@ class Msnr:
         cold4 = not v4.S["last"]; coldp = not plan.S["last"]
         ev4 = []; evp = []
         for b in b4:
-            v4.live = (not cold4) or b["time"] >= now - 1800
+            v4.live = b["time"] >= now - 1800                      # أحداث أقدم من 30 دقيقة (بعد توقف) تُعالَج بصمت: لا رسائل قديمة ولا تكرار
             v4.events = []; v4.step(b); ev4 += v4.events
             self.map.feed_until(b["time"] + 300)
         v4.events = []
         for b in bp:
-            plan.live = (not coldp) or b["time"] >= now - 900
+            plan.live = b["time"] >= now - 900
             plan.events = []; plan.step(b); evp += plan.events
         plan.events = []
         return ev4, evp

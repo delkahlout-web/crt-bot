@@ -83,9 +83,16 @@ jobs:
         run: |
           git config user.name "sh-bot"
           git config user.email "sh-bot@users.noreply.github.com"
-          git add sh_state.json
-          [ -f msnr_state.json ] && git add msnr_state.json || true
-          git diff --cached --quiet || (git commit -m "sh state" && git pull --rebase --autostash -q && git push) || (git pull --rebase --autostash -q && git push) || true
+          git rebase --abort 2>/dev/null || true
+          for i in 1 2 3; do
+            git fetch -q origin main || true
+            git reset -q origin/main || true
+            git add sh_state.json
+            [ -f msnr_state.json ] && git add msnr_state.json || true
+            if git diff --cached --quiet; then break; fi
+            git commit -q -m "sh state" && git push -q origin HEAD:main && break || sleep 3
+          done
+          true
 
       # إن انتهى التشغيل مبكراً (خلل أو إعادة تشغيل) نُطلق التالي فوراً بدل انتظار جدولة GitHub (قد تتأخر ~35 دقيقة)
       - name: Hand over to the next run

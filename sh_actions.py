@@ -98,24 +98,45 @@ def commit_state(block=False):
         threading.Thread(target=work, daemon=True).start()
 
 
+LAST_PUSH = {"ok": time.time(), "fail": 0}
+
+
 def _commit_state_sync():
+    """حفظ الحالة بلا rebase ولا stash (لا يعلق أبداً): fetch ثم reset مختلط إلى origin/main (تبقى ملفات الحالة المعدّلة كما هي) ثم commit لملفات الحالة وpush.
+    ويُنظّف أي حالة عالقة (rebase/merge غير مكتمل أو قفل فهرس قديم) قبل كل محاولة."""
     try:
         import subprocess
         run = lambda *a: subprocess.run(a, cwd=HERE, capture_output=True, text=True, timeout=60)
+        for c in (("git", "rebase", "--abort"), ("git", "merge", "--abort"), ("git", "cherry-pick", "--abort")):
+            run(*c)
+        lock = os.path.join(HERE, ".git", "index.lock")
+        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) > 60:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
         run("git", "config", "user.name", "sh-bot"); run("git", "config", "user.email", "sh-bot@users.noreply.github.com")
-        run("git", "add", "sh_state.json")
-        if os.path.exists(os.path.join(HERE, "msnr_state.json")):
-            run("git", "add", "msnr_state.json")
-        if run("git", "diff", "--cached", "--quiet").returncode == 0:
-            return
-        run("git", "commit", "-m", "sh state")
         for k in range(4):
-            if run("git", "push").returncode == 0:
+            run("git", "fetch", "-q", "origin", "main")
+            run("git", "reset", "-q", "origin/main")
+            run("git", "add", "sh_state.json")
+            if os.path.exists(os.path.join(HERE, "msnr_state.json")):
+                run("git", "add", "msnr_state.json")
+            if run("git", "diff", "--cached", "--quiet").returncode == 0:
+                LAST_PUSH["ok"] = time.time(); LAST_PUSH["fail"] = 0
                 return
-            run("git", "pull", "--rebase", "--autostash", "-q")             # الملفات تتغيّر أثناء الحفظ الخلفي: autostash يمنع رفض السحب
+            r = run("git", "commit", "-q", "-m", "sh state")
+            if r.returncode != 0:
+                log(f"commit فشل: {(r.stderr or r.stdout)[:120]}")
+                time.sleep(2 * (k + 1)); continue
+            if run("git", "push", "-q", "origin", "HEAD:main").returncode == 0:
+                LAST_PUSH["ok"] = time.time(); LAST_PUSH["fail"] = 0
+                return
             time.sleep(2 * (k + 1))
-        log("تعذّر دفع الحالة بعد 3 محاولات")
+        LAST_PUSH["fail"] += 1
+        log(f"تعذّر دفع الحالة بعد 4 محاولات (إخفاقات متتالية: {LAST_PUSH['fail']})")
     except Exception as ex:
+        LAST_PUSH["fail"] += 1
         log(f"تعذّر حفظ الحالة: {ex}")
 
 
