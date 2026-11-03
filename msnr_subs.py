@@ -29,8 +29,9 @@ OWNER_HELP = ("🛠 <b>لوحة التحكم</b>\n┄┄┄┄┄┄┄┄┄┄
               "<code>1 وقف هدف</code> — شراء الذهب الآن للجميع، مثال: <code>1 60 120</code>\n"
               "<code>2 وقف هدف</code> — بيع الذهب الآن للجميع، مثال: <code>2 60 120</code>\n"
               "(الوقف والهدف بالنقاط، والنقطة = 0.1$؛ اكتبها مباشرة بلا أمر)\n"
+              "<code>ت 1 60 120</code> — تجربة تصلك وحدك بلا إرسال لأحد\n"
               "/map — خريطة المناطق\n/health — حالة النظام الآن")
-_TRADE = re.compile(r"^\s*([12])\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*$")
+_TRADE = re.compile(r"^\s*(ت|تجربة|t|test)?\s*[:\-]?\s*([12])\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*[\s,،/]+\s*(\d+(?:\.\d+)?)\s*$", re.I)
 _DIG = str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
 
 
@@ -173,7 +174,7 @@ class Broadcast:
             return False
         return True
 
-    def _trade(self, cid, side, sl, tp):
+    def _trade(self, cid, side, sl, tp, test=False):
         """توصية فورية من صاحب البوت: 1 = شراء، 2 = بيع، ثم وقف وهدف بالنقاط. تصل لكل المشتركين وله."""
         if not (0 < sl <= 2000 and 0 < tp <= 5000):
             self._post(cid, "⚠️ الوقف أو الهدف خارج المدى المعقول. أعد الكتابة، مثال: <code>1 60 120</code>")
@@ -184,6 +185,9 @@ class Broadcast:
             self.log(f"توصية: {ex}"); self._post(cid, f"تعذّر: {ex}"); return
         if not text:
             self._post(cid, "⚠️ لا يوجد سعر حديث الآن، لم يُرسل شيء. أعد المحاولة بعد لحظات.")
+            return
+        if test:
+            self._post(cid, "🧪 <b>تجربة — وصلتك وحدك ولم تُرسل لأحد</b>\n\n" + text)
             return
         self.send(text)
         self._post(cid, f"✅ أُرسلت التوصية لـ {len([c for c in self.subs if c != str(self.chat_id)])} مشترك", silent=True)
@@ -224,7 +228,7 @@ class Broadcast:
                 if self.trade_handler and not frm.get("is_bot") and str(chat.get("id")) == str(self.chat_id) and str(frm.get("id")) == str(self.chat_id):
                     mt = _TRADE.match(text.translate(_DIG))
                     if mt:
-                        self._trade(str(chat.get("id")), int(mt.group(1)), float(mt.group(2)), float(mt.group(3)))
+                        self._trade(str(chat.get("id")), int(mt.group(2)), float(mt.group(3)), float(mt.group(4)), test=bool(mt.group(1)))
                         continue
                 if not text.startswith("/") or frm.get("is_bot"):
                     continue
