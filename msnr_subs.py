@@ -221,9 +221,6 @@ class Broadcast:
                  st="open" if entry is None else "pending", lt=time.time(), t0=time.time(),
                  pt=("Buy Limit" if e < px else "Buy Stop") if buy else ("Sell Limit" if e > px else "Sell Stop"))
         act = "نشتري" if buy else "نبيع"
-        if x["st"] == "pending" and x["pt"] in ("Buy Limit", "Sell Limit") and ((px >= x["tpp"]) if buy else (px <= x["tpp"])):
-            self._post(cid, f"⚠️ السعر الحالي {px:.2f} تجاوز هدف هذا الأمر ({x['tpp']:.2f}) أصلًا. راجع الأرقام.")
-            return
         if x["st"] == "open":
             head = self._say(f"{act} الذهب الآن {'🟢' if buy else '🔴'}")
             text = self._card(x, head)
@@ -268,11 +265,6 @@ class Broadcast:
                 x["lt"] = t; buy = x["s"] == 1; pip = 0.1
                 if x["st"] == "pending":
                     hit = (p <= x["e"] if x["pt"] == "Buy Limit" else p >= x["e"] if x["pt"] == "Buy Stop" else p >= x["e"] if x["pt"] == "Sell Limit" else p <= x["e"])
-                    miss = x["pt"] in ("Buy Limit", "Sell Limit") and ((p >= x["tpp"]) if buy else (p <= x["tpp"]))
-                    if miss:
-                        tr.remove(x); self.dirty = True
-                        self.send(self._say("ألغينا الأمر المعلّق: السعر وصل الهدف قبل أن يتفعّل ✋") + f"\n\n🕒 {self._tm()}")
-                        break
                     if hit:
                         x["st"] = "open"; x["ot"] = t; self.dirty = True
                         self.send(self._say(f"تفعّل الأمر المعلّق، {'اشترينا' if buy else 'بعنا'} الذهب ⚡") + f"\n\n📍 الدخول <code>{x['e']:.2f}</code>   🛑 <code>{x['slp']:.2f}</code>   🎯 <code>{x['tpp']:.2f}</code>\n🕒 {self._tm()}")
