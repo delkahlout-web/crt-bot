@@ -219,7 +219,7 @@ class Broadcast:
         e = px if entry is None else entry
         x = dict(id=int(time.time()), s=side, e=e, sl=sl, tp=tp, slp=e - sl * pip if buy else e + sl * pip, tpp=e + tp * pip if buy else e - tp * pip,
                  st="open" if entry is None else "pending", lt=time.time(), t0=time.time(),
-                 pt=("Buy Limit" if e < px else "Buy Stop") if buy else ("Sell Limit" if e > px else "Sell Stop"))
+                 pt="Buy Limit" if buy else "Sell Limit", up=e > px)
         act = "نشتري" if buy else "نبيع"
         if x["st"] == "open":
             head = self._say(f"{act} الذهب الآن {'🟢' if buy else '🔴'}")
@@ -264,7 +264,7 @@ class Broadcast:
             for t, p in [s for s in buf if s[0] > x["lt"]]:
                 x["lt"] = t; buy = x["s"] == 1; pip = 0.1
                 if x["st"] == "pending":
-                    hit = (p <= x["e"] if x["pt"] == "Buy Limit" else p >= x["e"] if x["pt"] == "Buy Stop" else p >= x["e"] if x["pt"] == "Sell Limit" else p <= x["e"])
+                    hit = (p >= x["e"]) if x.get("up") else (p <= x["e"])          # يتفعّل عند وصول السعر إلى الدخول من الجهة التي بدأ منها
                     if hit:
                         x["st"] = "open"; x["ot"] = t; self.dirty = True
                         self.send(self._say(f"تفعّل الأمر المعلّق، {'اشترينا' if buy else 'بعنا'} الذهب ⚡") + f"\n\n📍 الدخول <code>{x['e']:.2f}</code>   🛑 <code>{x['slp']:.2f}</code>   🎯 <code>{x['tpp']:.2f}</code>\n🕒 {self._tm()}")
