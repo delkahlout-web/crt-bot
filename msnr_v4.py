@@ -20,7 +20,7 @@ DEF = dict(
     kClassic=True, kGap=False, kFlip=True, kQML=True, brkN=2, minStars=1, liqPips=30.0, keepT=False, histDepth=500,
     nPer=1, maxPerSide=3, mergeGap=20.0, minAge=0, maxDist=500.0, confOnly=False, pipSize=0.1,
     retestC=2, retLife=40, refineOn=True, refineMax=50.0, rejOn=True, farPts=30.0, strongPts=30.0, chkHide=True,
-    retTolPts=5.0, msgMaxG=3, dedupeH=3.0, touchLive=True,
+    retTolPts=5.0, msgMaxG=3, dedupeH=3.0, touchLive=True, alertMinStars=2, alertMinRankG=2,
 )
 TYPE_TXT = {
     1: "ذيل ضعيف + إغلاق قريب: يُتوقَّع سحب سيولة قمة الذيل أولاً — لا تدخل فوراً، ابحث عن Refine عند/فوق الذيل",
@@ -366,6 +366,19 @@ class V4:
         x["ux"] = (4 if far else 3) if dpt >= self.P["strongPts"] * pip else (2 if far else 1)
         x["uw"] = yl if sup else yh; x["uq"] = yc
 
+    def strong(self, g, L):
+        """فلتر القوة: مستوى بنجمتين فأكثر، أو فريم 4H فما فوق، أو متقاطع مع مستوى من فريم آخر عند السعر نفسه."""
+        P = self.P
+        if L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= P["alertMinStars"] or g <= P["alertMinRankG"]:
+            return True
+        mg = P["mergeGap"] * P["pipSize"]
+        for k in range(5):
+            if k != g and P["tfOn"][k]:
+                for M in self.E[k].lv:
+                    if M["r"] == L["r"] and abs(M["p"] - L["p"]) <= mg and M["us"] == 0 and M["ac"] + M["br"] + (1 if M["lq"] > 0 else 0) >= P["minStars"]:
+                        return True
+        return False
+
     def _fresh_cross(self, L, kon, low, high, prev, cur):
         """هل لُمس المستوى الطازج للتو (بالشمعة أو بالسعر الحي) قادماً من الجهة الصحيحة؟"""
         if not (L["us"] == 0 and L["pd"] == 0 and not L.get("e1") and kon[L["kd"]] and L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= self.P["minStars"]):
@@ -383,7 +396,7 @@ class V4:
             for L in self.E[g].lv:
                 if self._fresh_cross(L, kon, bar["low"], bar["high"], pc, cur):
                     L["e1"] = 1; self._track(g, L, T)
-                    if self.live and g <= P["msgMaxG"] and self.allowed("touch", L, end):
+                    if self.live and g <= P["msgMaxG"] and self.strong(g, L) and self.allowed("touch", L, end):
                         self.events.append(self.make_event("touch", g, L, end, cur))
         S["pc"] = cur
         self.feed_until(end, silent=True)                           # المحرّك يغذّى بالشموع؛ حالاته الداخلية لا تُرسَل (التأكيد من المتتبِّع)
@@ -395,7 +408,7 @@ class V4:
             yh, yl, yc = cc["high"], cc["low"], cc["close"]
             ok_side = yc > p if sup else yc < p
             touch_c = (yl <= p) if sup else (yh >= p)
-            emit = self.live and g <= P["msgMaxG"] and P["tfOn"][g]
+            emit = self.live and g <= P["msgMaxG"] and P["tfOn"][g] and self.strong(g, x)
             if x["s"] == 1:
                 if x["T"] < cend:
                     if ok_side:
@@ -443,10 +456,10 @@ class V4:
             for L in self.E[g].lv:
                 if prev is not None and self._fresh_cross(L, kon, cur, cur, prev, cur):          # عبر السعر الحي المستوى الطازج للتو
                     L["e1"] = 1; self._track(g, L, int(now) // 300 * 300)
-                    if g <= P["msgMaxG"] and self.allowed("touch", L, now):
+                    if g <= P["msgMaxG"] and self.strong(g, L) and self.allowed("touch", L, now):
                         out.append(self.make_event("touch", g, L, now, cur, live=True))
         for x in self.S["trk"]:
-            if x["s"] == 2 and not x["e3"] and x["n"] <= P["retestC"] and x["g"] <= P["msgMaxG"]:
+            if x["s"] == 2 and not x["e3"] and x["n"] <= P["retestC"] and x["g"] <= P["msgMaxG"] and self.strong(x["g"], x):
                 sup = x["r"] == 1; p = x["p"]
                 if (sup and p - 2 * tol <= cur <= p + tol) or ((not sup) and p - tol <= cur <= p + 2 * tol):
                     x["e3"] = 1
@@ -498,10 +511,10 @@ class V4:
                     continue
                 hit = next((c for c in cl if abs(c["price"] - p) <= P["mergeGap"] * pip and (c["role"] == "support") == (r == 1)), None)
                 if hit:
-                    hit["tags"].append(TFN[g])
+                    hit["tags"].append(TFN[g]); hit["strong"] = True
                 else:
                     w = ("A" if L["ac"] else "") + ("B" if L["br"] else "") + ("L" if L["lq"] > 0 else "")
-                    cl.append(dict(price=p, role="support" if r == 1 else "resistance", tags=[TFN[g]], kd=L["kd"], kind=kind_name(L["kd"], r),
+                    cl.append(dict(strong=(len(w) >= P["alertMinStars"] or g <= P["alertMinRankG"]), price=p, role="support" if r == 1 else "resistance", tags=[TFN[g]], kd=L["kd"], kind=kind_name(L["kd"], r),
                                    marks=("★" * len(w)), why=w, hl=L["hl"], stars=len(w), tests=L["ts"], af=L["af"], tf=g))
         if P["confOnly"]:
             cl = [c for c in cl if len(c["tags"]) > 1]

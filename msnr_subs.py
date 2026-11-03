@@ -15,7 +15,7 @@ WELCOME = ("🟧 <b>أهلاً بك في MSNR</b>\n▰▰▰▰▰▰▰▰▰�
            "ستصلك لحظة حدوثها رسائل مستويات الذهب:\n"
            "⚠️ قرب  ·  ⚡ لمس  ·  ✅ رفض مؤكَّد  ·  🔁 إعادة اختبار\n"
            "🎯 وصفقات جلسة 4H مع الدخول والوقف والهدف\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-           "للإلغاء أرسل /stop  ·  للحالة /status\n"
+           "للإلغاء /stop  ·  للحالة /status  ·  لخريطة المناطق /map\n"
            "<i>المعلومات للتعليم وليست توصية مالية.</i>")
 
 
@@ -25,6 +25,7 @@ class Broadcast:
         self.subs = state.setdefault("subs", {})
         state.setdefault("upd", 0)
         self.dirty = False
+        self.handlers = {}                                           # أوامر إضافية: {"/map": دالة تعيد النص}
         self.base = tg.base; self.token = tg.token; self.chat_id = tg.chat_id
         self._lock = threading.Lock()
 
@@ -87,6 +88,11 @@ class Broadcast:
                 elif cmd == "/stop":
                     if self.subs.pop(cid, None) is not None:
                         self._post(cid, "تم إلغاء اشتراكك. أرسل /start متى شئت للعودة.")
+                elif cmd in self.handlers:
+                    try:
+                        self._post(cid, self.handlers[cmd]())
+                    except Exception as exh:
+                        self.log(f"أمر {cmd}: {exh}")
                 elif cmd == "/status":
                     self._post(cid, "✅ مشترك — الرسائل تصلك لحظياً." if (cid in self.subs or cid == str(self.chat_id)) else "غير مشترك — أرسل /start.")
         except Exception as ex:

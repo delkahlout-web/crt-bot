@@ -12,6 +12,7 @@ import json
 import os
 import time
 
+import msnr_map as MAP
 import msnr_msgs3 as MG3
 import msnr_plan as PL
 import msnr_v4 as V4M
@@ -26,6 +27,11 @@ SAME_LEVEL = 1.2                       # مستويان بينهما أقل من
 
 DEF = dict(alertPts=50.0, rearmPts=100.0, cooldownMin=30, maxAlertsPerDay=15, snapshotHours=0, enabled=True,
            v4={}, plan={}, levelAlerts=True, planAlerts=True)
+
+
+class SelfHeal(RuntimeError):
+    """خلل اكتشفه النظام بنفسه (تخلّف/تأخر): يُعاد تهيئة MSNR فوراً من الحالة المحفوظة."""
+    fatal = True
 
 
 def log(msg):
@@ -144,8 +150,10 @@ class Msnr:
         self.m15 = build_store(self.seed["m15"], self.st["m15"])
         self.v4 = V4M.V4(P=self.cfg.get("v4"), S=self.st.get("v4"))
         self.plan = PL.Plan(P=self.cfg.get("plan"), S=self.st.get("plan"))
+        self.map = MAP.LevelMap(self.cfg.get("map"))
         self.warmed = False
         self.dirty = False
+        self._lat = []; self._heal = None
         self.P = self.v4.P
         log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} | مستويات v4 + خطة الجلسة | alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
 
@@ -168,11 +176,14 @@ class Msnr:
             rp = self.plan.restore(self.st.get("planeng")) if self.plan.S["last"] else False
         self.v4.set_candles(self.h1, self.m30, self.m15, chart5)
         self.plan.set_candles(self.v4.cl[3], self.v4.cl[4], self.v4.cl[2], chart5)
+        self.map.set_candles(self.v4.cl)
         if not self.warmed:
             if self.v4.S["last"] and not r4:
                 self.v4.warm(self.v4.S["last"] + 300)
             if self.plan.S["last"] and not rp:
                 self.plan.warm(self.plan.S["last"])
+            if self.v4.S["last"]:
+                self.map.feed_until(self.v4.S["last"] + 300)
             self.warmed = True
 
     def _run_bars(self, chart5, now):
@@ -187,6 +198,7 @@ class Msnr:
         for b in b4:
             v4.live = (not cold4) or b["time"] >= now - 1800
             v4.events = []; v4.step(b); ev4 += v4.events
+            self.map.feed_until(b["time"] + 300)
         v4.events = []
         for b in bp:
             plan.live = (not coldp) or b["time"] >= now - 900
@@ -230,6 +242,12 @@ class Msnr:
 
     def _emit(self, tg, ev4, evp, tz, now):
         sent = 0
+        for e in list(ev4) + list(evp):                                           # مراقبة التأخير: زمن الحدث ← لحظة المعالجة (يُستثنى التعويض بعد توقف طويل)
+            lat = 0.0 if e.get("live") else time.time() - e.get("at", time.time())
+            if lat < 600:
+                self._lat = (self._lat + [max(0.0, lat)])[-5:]
+        if len(self._lat) >= 3 and all(x > 150 for x in self._lat[-3:]):
+            self._lat = []; self._heal = "تأخر معالجة الأحداث أكثر من 150 ثانية ثلاث مرات متتالية"     # يُعالَج بعد الإرسال (لا تضيع الرسائل)
         if self.cfg.get("levelAlerts", True):
             for e in ev4:
                 sent += self._send(tg, MG3.v4_text(e, tz, self.v4.P), e["at"])
@@ -240,6 +258,15 @@ class Msnr:
                 log(f"خطة الجلسة: {e['kind']} {e.get('res', '')} {'شراء' if e['dir'] == 1 else 'بيع'} @ {e['entry']:.2f}")
         return sent
 
+    def map_levels(self, cur, now):
+        return self.map.levels(cur, lambda g: self.v4.forming_extremes(g, int(now), cur))
+
+    def map_reply(self, cur, tz):
+        """نص خريطة المناطق عند الطلب (/map) أو عند فتح الجلسة."""
+        if not self.warmed or cur is None:
+            return "الخريطة غير جاهزة بعد، حاول بعد دقيقة."
+        return MG3.map_text(self.map_levels(cur, time.time()), cur, tz)
+
     def levels(self, chart5, cur, now, force=False):
         return self.v4.shown(cur, now)
 
@@ -248,6 +275,9 @@ class Msnr:
         """يعيد عدد الرسائل المرسلة. لا يرفع استثناءً لخارج الحلقة إلا لتعالجه (إصلاح ذاتي في sh_actions)."""
         if not self.cfg.get("enabled", True) or not self.h1:
             return 0
+        if self._heal:
+            msg, self._heal = self._heal, None
+            raise SelfHeal(msg)
         sent = 0
         yd = yahoo_h1 if isinstance(yahoo_h1, dict) else {"h1": yahoo_h1}
         extend_store(self.h1, self.st["h1"], yd.get("h1", []), basis, now, 3600)
@@ -258,8 +288,8 @@ class Msnr:
         ev4, evp = self._run_bars(chart5, now)
         if mkt and chart5:
             lag = max(chart5[-1]["time"] - self.v4.S["last"], chart5[-1]["time"] - self.plan.S["last"])
-            if lag > 900:                                                         # المحرّكات متخلفة عن الشموع أكثر من 15 دقيقة: إصلاح ذاتي بإعادة التهيئة
-                raise RuntimeError(f"تخلّف معالجة الشموع {lag // 60} دقيقة")
+            if lag > 900:                                                         # المحرّكات متخلفة عن الشموع أكثر من 15 دقيقة: إصلاح ذاتي بإعادة التهيئة (بعد إرسال ما لدينا)
+                self._heal = f"تخلّف معالجة الشموع {lag // 60} دقيقة"
         if not mkt:
             ev4 = []; evp = []                                                    # لا رسائل بسعر قديم والسوق مغلق
         sent += self._emit(tg, ev4, evp, tz, now)
@@ -278,6 +308,11 @@ class Msnr:
             save_state(self.st)
             return sent
         lv = self.levels(chart5, cur, now)
+        hr3 = (dt.datetime.fromtimestamp(now, dt.timezone.utc) + dt.timedelta(hours=3))
+        mkey = f"{hr3:%Y%m%d}{hr3.hour:02d}"
+        if self.cfg.get("mapAlerts", True) and hr3.hour in self.plan.P["sessH"] and self.st.get("mapKey") != mkey and hr3.minute >= 1:
+            if tg.send(self.map_reply(cur, tz)):                                   # خريطة المناطق عند فتح كل جلسة 4H
+                self.st["mapKey"] = mkey; sent += 1
         day = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%d")
         if self.st.get("day") != day:
             self.st["day"] = day; self.st["dayN"] = 0
@@ -292,6 +327,8 @@ class Msnr:
             del al[k]
         for c in lv if self.cfg.get("levelAlerts", True) else []:
             if (c["role"] == "support") != (c["price"] < cur):                    # مستوى تجاوزه السعر لا يُنبَّه عليه
+                continue
+            if not c.get("strong", True):                                          # فلتر القوة: نجمتان فأكثر أو 4H فما فوق أو تقاطع فريمات
                 continue
             rec = next((v for v in al.values() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= SAME_LEVEL), None)
             dist = abs(c["price"] - cur)

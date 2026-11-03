@@ -16,6 +16,16 @@ TYPE_SHORT = {
 }
 
 
+def fmt_tags(tags):
+    """يدمج الفريمات المكررة: ['30M','30M','1H'] ← 30M×2+1H."""
+    out = []; cnt = {}
+    for t in tags:
+        if t not in cnt:
+            out.append(t)
+        cnt[t] = cnt.get(t, 0) + 1
+    return "+".join(t + (f"×{cnt[t]}" if cnt[t] > 1 else "") for t in out)
+
+
 def hm(at, tz):
     """وقت الحدث نفسه (لا وقت الإرسال) بتوقيت فلسطين، مع تنبيه قصير إن تأخر الإرسال."""
     d = dt.datetime.fromtimestamp(at, ZoneInfo(tz))
@@ -103,7 +113,7 @@ def plan_text(e, tz, P):
 def level_desc(c):
     why = c.get("why", "")
     reasons = " · ".join(WHY[x] for x in why)
-    tags = "+".join(c["tags"])
+    tags = fmt_tags(c["tags"])
     return f"{tags} {c.get('kind', '')}  {stars(why)}" + (f" ({reasons})" if reasons else "") + (f" 💧{c['hl']}" if c.get("hl") else "") + (" ⚡" if c.get("af") else "")
 
 
@@ -112,7 +122,7 @@ def alert_text(c, cur, tz, P):
     role = 1 if c["role"] == "support" else -1
     why = c.get("why", "")
     rank = RANK.get(c["tags"][0], c["tags"][0])
-    lines = [head("⚠️ <b>قرب من المستوى</b>", role, "+".join(c["tags"]) + " " + c.get("kind", "")),
+    lines = [head("⚠️ <b>قرب من المستوى</b>", role, fmt_tags(c["tags"]) + " " + c.get("kind", "")),
              f"المستوى  <code>{c['price']:.2f}</code>", f"السعر     <code>{cur:.2f}</code>  ({'يقترب من الأعلى' if d > 0 else 'يقترب من الأسفل'})",
              f"المسافة  {abs(d):.2f}$  ({pts:.0f} نقطة)", power(why, c.get("af"), rank)]
     if c.get("hl"):
@@ -130,3 +140,20 @@ def snapshot_text(levels, cur, tz, P):
         rows.append(f"{icon} <code>{c['price']:.2f}</code>  ({c['price'] - cur:+.1f}$)  ·  {level_desc(c)}")
     return (f"{TOP}\n📋 <b>المستويات الحالية</b>\n{SEP}\n" + "\n".join(rows) +
             f"\n{SEP}\nالسعر الآن <code>{cur:.2f}</code>\n🕒 {hm(time.time(), tz)}\n<i>الأسعار تقديرية بفرق نحو 1$ عن شارتك: اعتمد على القرب والنوع.</i>")
+
+
+def map_text(m, cur, tz, title="خريطة المناطق"):
+    """أقوى المستويات على أي بُعد: مقاومات من الأعلى للأدنى ثم السعر ثم الدعوم (كما تظهر على الشارت)."""
+    def row(c):
+        icon = "🟥" if c["role"] == "resistance" else "🟩"
+        reasons = " · ".join(WHY[x] for x in c["why"])
+        multi = " ✓متعدد" if len(c["tags"]) > 1 else ""
+        return (f"{icon} <code>{c['price']:.2f}</code> ({c['price'] - cur:+.1f}$)  {fmt_tags(c['tags'])} {c['kind']}  {stars(c['why'])}"
+                + (f" ({reasons})" if reasons else "") + (f" 💧{c['hl']}" if c.get("hl") else "") + multi)
+    res = sorted(m.get("resistance", []), key=lambda c: -c["price"]); sup = sorted(m.get("support", []), key=lambda c: -c["price"])
+    lines = [f"{TOP}", f"🗺 <b>{title}</b> · أقوى المستويات", SEP]
+    lines += [row(c) for c in res] or ["— لا مقاومات —"]
+    lines += [f"━━ السعر الآن <code>{cur:.2f}</code> ━━"]
+    lines += [row(c) for c in sup] or ["— لا دعوم —"]
+    lines += [SEP, f"🕒 {hm(time.time(), tz)}", "<i>الأقوى أولاً: نجوم + تقاطع فريمات + رتبة الفريم. أرسل /map لتحديثها في أي وقت.</i>"]
+    return "\n".join(lines)

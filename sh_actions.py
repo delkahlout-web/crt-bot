@@ -308,7 +308,7 @@ def compute(cfg, state):
 
 
 CODE_FILES = ["sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_pro.py", "msnr_msgs.py",
-              "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_subs.py", "msnr_config.json", "sh_track.py"]
+              "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_subs.py", "msnr_map.py", "msnr_config.json", "sh_track.py"]
 
 
 def code_changed():
@@ -365,6 +365,23 @@ def heartbeat_text(cfg, P):
             f"⚙️ الإعداد: طوكيو كل المستويات | لندن/نيويورك مستويات 15m | TP1 {P['tp1R']:g}R / TP2 {P['rr']:g}R\n🕒 {now}")
 
 
+HB = {"t": time.time(), "deadline": 0.0, "on": False}
+
+
+def start_watchdog():
+    """حارس داخلي: إن لم تُكمل الحلقة أي خطوة خلال 4 دقائق (تعليق شبكة أو غيره) يُعيد البوت تشغيل نفسه فوراً بالحالة المحفوظة."""
+    def run_wd():
+        while True:
+            time.sleep(10)
+            try:
+                if time.time() - HB["t"] > 240 and HB["deadline"] - time.time() > 60:
+                    log("الحارس: الحلقة متوقفة منذ أكثر من 4 دقائق — إعادة التشغيل")
+                    os.execv(sys.executable, [sys.executable, os.path.join(HERE, "sh_actions.py"), "--loop", f"{max((HB['deadline'] - time.time()) / 60, 1):.1f}"])
+            except Exception as ex:
+                log(f"الحارس: {ex}")
+    threading.Thread(target=run_wd, daemon=True).start()
+
+
 def main():
     cfg = json.load(open(os.path.join(HERE, "sh_config.json"), encoding="utf-8"))
     cfg["telegramToken"] = (os.environ.get("TELEGRAM_TOKEN") or cfg.get("telegramToken", "")).strip()
@@ -400,11 +417,21 @@ def main():
         MS = MA.Msnr()
     except Exception as ex:                                   # أي عطل في MSNR لا يمسّ إشارات SH
         MS = None; log(f"MSNR معطّل: {ex}")
+    if not HB["on"]:
+        HB["on"] = True; start_watchdog()
+    HB["deadline"] = deadline
+
+    def map_reply():
+        cur = SPOT_BUF[-1][1] if SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 180 else None
+        return MS.map_reply(cur, cfg.get("displayTz", "Asia/Hebron")) if (MS is not None and cur is not None) else "الخريطة غير جاهزة بعد، حاول بعد دقيقة."
+    if hasattr(tg, "handlers"):
+        tg.handlers["/map"] = map_reply; tg.handlers["/levels"] = map_reply
     yh1 = {"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
     errs = 0; last_chk = time.time(); ms_err = 0; fast_err = 0; last_bnd = int(time.time()) // 300; last_commit = time.time()
     while True:
+        HB["t"] = time.time()
         fresh_sent = False
         try:
             sample_spot(cfg.get("spotSym", "XAU"))
@@ -484,7 +511,7 @@ def main():
             except Exception as ex:
                 ms_err += 1
                 log(f"MSNR خطأ ({ms_err}): {ex}")
-                if ms_err >= 3:                                            # إصلاح ذاتي: إعادة تهيئة MSNR من الحالة المحفوظة بعد 3 أخطاء متتالية
+                if ms_err >= 3 or getattr(ex, "fatal", False):                                            # إصلاح ذاتي: إعادة تهيئة MSNR من الحالة المحفوظة بعد 3 أخطاء متتالية
                     try:
                         import importlib, msnr_actions as MA2
                         importlib.reload(MA2); MS = MA2.Msnr(); ms_err = 0
@@ -529,7 +556,7 @@ def main():
         # دورة سريعة (~20 ث): عيّنة سعر كل ~4 ثوانٍ، وMSNR يفحص لمس المستوى/الرفض/إعادة الاختبار بالسعر الحي فوراً
         t_end = time.time() + 20
         while time.time() < t_end:
-            time.sleep(4); sample_spot(cfg.get("spotSym", "XAU"))
+            time.sleep(4); sample_spot(cfg.get("spotSym", "XAU")); HB["t"] = time.time()
             try:
                 if hasattr(tg, "poll"):
                     tg.poll()                                                     # /start و/stop من المشتركين (رد خلال ثوانٍ)
@@ -550,7 +577,7 @@ def main():
                 except Exception as ex:
                     fast_err += 1
                     log(f"MSNR فوري خطأ ({fast_err}): {ex}")
-                    if fast_err >= 5:                                              # إصلاح ذاتي: 5 أخطاء لحظية متتالية = إعادة تهيئة MSNR من الحالة المحفوظة
+                    if fast_err >= 5 or getattr(ex, "fatal", False):                                              # إصلاح ذاتي: 5 أخطاء لحظية متتالية = إعادة تهيئة MSNR من الحالة المحفوظة
                         try:
                             import importlib, msnr_actions as MA3
                             importlib.reload(MA3); MS = MA3.Msnr(); fast_err = 0

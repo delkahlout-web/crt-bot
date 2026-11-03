@@ -142,10 +142,10 @@ class Eng3:
                     if self.lastSL is not None and self.lastSL < c1:
                         oppP = self.lastSL
                 lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0, lq=0, wt=0, rt=0, af=1 if actF else 0))
-                if len(lv) > 60:
+                if len(lv) > P.get("maxLv", 60):
                     lv.pop(0)
 
-    def select(self, cur, P, kf=True):
+    def select(self, cur, P, kf=True, by_str=False):
         """أقرب مستويات فوق السعر وتحته (حتى nPer لكل جهة) بعد مرشّح النوع والنجوم والعمر."""
         pip = P["pipSize"]; out = []
         kon = {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}
@@ -161,11 +161,12 @@ class Eng3:
                     d = L["p"] - cur
                     if (d > 0) if side == 0 else (d < 0):
                         ad = abs(d)
-                        if best == -1 or ad < bd:
-                            best, bd = i, ad
+                        keyv = (L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0)) * 1000.0 - ad / pip if by_str else -ad
+                        if best == -1 or keyv > bd:
+                            best, bd = i, keyv
                 if best >= 0:
                     used.add(best); L = self.lv[best]
-                    out.append(dict(p=L["p"], r=L["r"], kd=L["kd"], ts=min(L["ts"], 9), stc=L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0),
+                    out.append(dict(p=L["p"], r=L["r"], kd=L["kd"], ts=min(L["ts"], 9), stc=L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0), ac=L["ac"], br=L["br"], lq=L["lq"],
                                     hl=int(min(round(L["wt"] / pip), 999)), rt=L["rt"], af=L["af"],
                                     o=(L["tm"] if (P["flipFromBreak"] and L["kd"] >= 3) else L["og"])))
         return out
