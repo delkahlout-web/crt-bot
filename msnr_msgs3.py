@@ -69,7 +69,7 @@ def v4_text(e, tz, P):
     if e.get("fake"):
         lines.append("⚠️ بعد إغلاق واحد خلف المستوى (كسر وهمي محتمل)")
     if nxt:
-        lines.append(f"🔎 التأكيد/الدخول على {nxt}  (مستوى {cf} ← {nxt})")
+        lines.append(f"🔎 التأكيد على {cf}  ·  الدخول على {nxt}")
     lines += [SEP, f"✔️ أُغلقت شمعة {cf} {side_word} المستوى", tm]
     return "\n".join(lines)
 

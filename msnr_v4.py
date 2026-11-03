@@ -11,6 +11,9 @@ import msnr_pro as MP
 
 TFN = ["W", "D", "4H", "1H", "30M", "15M"]
 NEXT_TF = ["D", "4H", "1H", "30M", "15M", "5M"]          # فريم التأكيد/الدخول التالي الأصغر (الفيديو 17)
+CONF = [1, 2, 3, 4, 5, 6]                                 # فهرس فريم تأكيد كل مستوى: W←D · D←4H · 4H←1H · 1H←30M · 30M←15M
+CONFN = ["D", "4H", "1H", "30M", "15M", "5M"]
+ENTRYN = ["4H", "1H", "30M", "15M", "5M", "1M"]            # فريم الدخول (أصغر من فريم التأكيد)
 SECS = [604800, 86400, 14400, 3600, 1800, 900]
 DEF = dict(
     tfOn=[True, True, True, True, True, False], classicMode=0,
@@ -199,7 +202,7 @@ class Eng4:
 
 
 def fresh_state():
-    return dict(last=0, bi=0, sent=[])
+    return dict(last=0, bi=0, sent=[], trk=[])
 
 
 class V4:
@@ -213,7 +216,7 @@ class V4:
         self.ptr = [0] * 6; self.fed = [0] * 6
         self.chart5 = []
         self.events = []; self.live = True
-        self._pcur = None
+        self._pcur = None; self._new = {}
 
     # ───────────── حفظ/استعادة حالة المحرّكات (تشغيل متقطع = نفس النتيجة تماماً) ─────────────
     def dump(self):
@@ -246,7 +249,7 @@ class V4:
 
     def feed_until(self, T, silent=False):
         """يغذّي كل شمعة فريم نهايتها ≤ T؛ عند أول تغذية لفريم يبدأ من آخر histDepth شمعة فقط (كالمؤشر). يعيد قائمة انتقالات (g, kind, snap, candle)."""
-        out = []
+        out = []; self._new = {}
         depth = self.P["histDepth"]
         for k in range(6):
             lst = self.cl[k]
@@ -260,7 +263,7 @@ class V4:
                 if c["end"] > T:
                     break
                 self.ptr[k] += 1
-                tr = self.E[k].feed(c, self.P); self.fed[k] = c["time"]
+                tr = self.E[k].feed(c, self.P); self.fed[k] = c["time"]; self._new[k] = c
                 if not silent:
                     out += [(k, kd, snap, c) for kd, snap, _ in tr]
         return out
@@ -305,15 +308,12 @@ class V4:
         return (min(a, b), max(a, b))
 
     def cluster_tag(self, g, L):
-        """وسوم كل المستويات في حالة رفض/اختبار عند نفس السعر (نفس الجهة) في رسالة واحدة، الأكبر فريماً أولاً."""
+        """وسوم كل المستويات المتتبَّعة (ملموسة/مرفوضة) عند نفس السعر ونفس الجهة في رسالة واحدة، الأكبر فريماً أولاً."""
         mg = self.P["mergeGap"] * self.P["pipSize"]; mem = [(g, L)]
-        for k in range(6):
-            if not self.P["tfOn"][k] or k > self.P["msgMaxG"]:
-                continue
-            for M in self.E[k].lv:
-                if M["us"] in (2, 5) and M["r"] == L["r"] and abs(M["p"] - L["p"]) <= mg and not (k == g and abs(M["p"] - L["p"]) < 1e-9):
-                    mem.append((k, M))
-        mem.sort(key=lambda x: x[0])
+        for x in self.S["trk"]:
+            if x is not L and x["s"] in (1, 2, 5) and x["r"] == L["r"] and abs(x["p"] - L["p"]) <= mg and x["g"] <= self.P["msgMaxG"] and x["g"] != g:
+                mem.append((x["g"], x))
+        mem.sort(key=lambda m: m[0])
         return " + ".join(self.tag_of(k, M) for k, M in mem[:4])
 
     def refine_of(self, g, L, cur):
@@ -348,61 +348,110 @@ class V4:
 
     def make_event(self, kind, g, L, at, cur, live=False):
         z = self.zone(L)
-        why = why_of(L); nxt = NEXT_TF[g]
-        return dict(kind=kind, p=L["p"], role=L["r"], tag=self.cluster_tag(g, L), g=g, cf=TFN[g], cur=cur, x=L.get("ux", 0), w=L.get("uw"), c=L.get("uq"),
+        why = why_of(L); nxt = ENTRYN[g]
+        return dict(kind=kind, p=L["p"], role=L["r"], tag=self.cluster_tag(g, L), g=g, cf=CONFN[g], cur=cur, x=L.get("ux", 0), w=L.get("uw"), c=L.get("uq"),
                     zone=z, mid=(None if z is None else (z[0] + z[1]) / 2), refine=self.refine_of(g, L, cur), at=at, fake=bool(L.get("um")), af=L.get("af"), live=live, why=why, nxt=nxt, rank=TFN[g])
+
+    # ───────────── المتتبِّع: لمس ← رفض ← إعادة اختبار بتأكيد فريم أصغر ─────────────
+    def _track(self, g, L, T):
+        self.S["trk"].append(dict(g=g, p=L["p"], r=L["r"], kd=L["kd"], ac=L["ac"], br=L["br"], lq=L["lq"], af=L["af"], s=1, T=int(T), n=0, m=0,
+                                  ux=0, uw=None, uq=None, um=0, e3=0))
+
+    def _classify(self, x, yh, yl, yc):
+        if not self.P["rejOn"]:
+            return
+        pip = self.P["pipSize"]; p = x["p"]; sup = x["r"] == 1
+        dpt = max(p - yl, 0) if sup else max(yh - p, 0)
+        far = abs(yc - p) >= self.P["farPts"] * pip
+        x["ux"] = (4 if far else 3) if dpt >= self.P["strongPts"] * pip else (2 if far else 1)
+        x["uw"] = yl if sup else yh; x["uq"] = yc
+
+    def _fresh_cross(self, L, kon, low, high, prev, cur):
+        """هل لُمس المستوى الطازج للتو (بالشمعة أو بالسعر الحي) قادماً من الجهة الصحيحة؟"""
+        if not (L["us"] == 0 and L["pd"] == 0 and not L.get("e1") and kon[L["kd"]] and L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= self.P["minStars"]):
+            return False
+        sup = L["r"] == 1; p = L["p"]
+        return ((low <= p) if sup else (high >= p)) and (prev is None or ((prev > p) if sup else (prev < p)))
 
     # ───────────── معالجة شمعة شارت 5د مغلقة ─────────────
     def step(self, bar):
-        S = self.S; T = int(bar["time"]); end = T + 300; cur = bar["close"]
-        P = self.P; pc = S.get("pc"); kon = {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}
-        for g in range(P["msgMaxG"] + 1):                       # لمس بالشمعة (يلتقط ما فاته العيّنات الحية) قبل أن تُغلق شمعة الفريم وتحوّله إلى رفض
+        S = self.S; P = self.P; T = int(bar["time"]); end = T + 300; cur = bar["close"]
+        pc = S.get("pc"); kon = {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}
+        for g in range(5):                                          # لمس بالشمعة (يلتقط ما فاته السعر الحي) قبل أن تُغلق شمعة الفريم
             if not P["tfOn"][g]:
                 continue
             for L in self.E[g].lv:
-                if L["us"] == 0 and L["pd"] == 0 and not L.get("e1") and kon[L["kd"]] and L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= P["minStars"]:
-                    sup = L["r"] == 1; p = L["p"]
-                    if ((bar["low"] <= p) if sup else (bar["high"] >= p)) and (pc is None or ((pc > p) if sup else (pc < p))):
-                        L["e1"] = 1
-                        if self.live and self.allowed("touch", L, end):
-                            self.events.append(self.make_event("touch", g, L, end, cur))
+                if self._fresh_cross(L, kon, bar["low"], bar["high"], pc, cur):
+                    L["e1"] = 1; self._track(g, L, T)
+                    if self.live and g <= P["msgMaxG"] and self.allowed("touch", L, end):
+                        self.events.append(self.make_event("touch", g, L, end, cur))
         S["pc"] = cur
-        for g, kind, snap, c in self.feed_until(end):
-            if not self.live or g > self.P["msgMaxG"] or not self.P["tfOn"][g]:
+        self.feed_until(end, silent=True)                           # المحرّك يغذّى بالشموع؛ حالاته الداخلية لا تُرسَل (التأكيد من المتتبِّع)
+        for x in S["trk"]:
+            cc = self._new.get(CONF[x["g"]])
+            if cc is None or x["s"] not in (1, 2, 3, 5):
                 continue
-            at = c["end"]
-            if kind == "ret":
-                # إعادة الاختبار أُرسلت لحظياً (السعر الحي لمس المستوى) أو مسجَّلة: لا تُكرَّر
-                pass
-            if self.allowed(kind, snap, at):
-                self.events.append(self.make_event(kind, g, snap, at, cur))
+            g = x["g"]; p = x["p"]; sup = x["r"] == 1; cend = cc["end"]
+            yh, yl, yc = cc["high"], cc["low"], cc["close"]
+            ok_side = yc > p if sup else yc < p
+            touch_c = (yl <= p) if sup else (yh >= p)
+            emit = self.live and g <= P["msgMaxG"] and P["tfOn"][g]
+            if x["s"] == 1:
+                if x["T"] < cend:
+                    if ok_side:
+                        x["s"] = 2; x["n"] = 0; x["m"] = 0; self._classify(x, yh, yl, yc)
+                        if emit and self.allowed("rej", x, cend):
+                            self.events.append(self.make_event("rej", g, x, cend, cur))
+                    else:
+                        x["s"] = 3
+            elif x["s"] == 2:
+                x["n"] += 1
+                if not ok_side:
+                    x["s"] = 3
+                elif touch_c and x["n"] <= P["retestC"]:
+                    x["s"] = 5; x["m"] = 0
+                    if emit and self.allowed("ret", x, cend):
+                        self.events.append(self.make_event("ret", g, x, cend, cur))
+                elif x["n"] > P["retestC"]:
+                    x["s"] = 9
+            elif x["s"] == 3:
+                if ok_side:
+                    x["s"] = 2; x["n"] = 0; x["m"] = 1; x["um"] = 1; self._classify(x, yh, yl, yc)     # عودة بعد «كسر 1/2»: بلا رسالة
+                else:
+                    x["s"] = 9
+            elif x["s"] == 5:
+                x["m"] += 1
+                if not ok_side:
+                    x["s"] = 3
+                elif x["m"] >= P["retLife"]:
+                    x["s"] = 9
+        S["trk"] = [x for x in S["trk"] if x["s"] != 9 and end - x["T"] < 86400][-80:]
         S["bi"] += 1; S["last"] = T
 
     # ───────────── لحظي: السعر الحي ─────────────
     def fast(self, cur, now):
-        """بعد رفض مؤكَّد: حين يلمس السعر الحي المستوى مجدداً (إعادة اختبار) نرسل فوراً بلا انتظار إغلاق الشمعة."""
+        """لمس المستوى الطازج وإعادة الاختبار بعد رفض مؤكَّد: فوراً من السعر الحي بلا انتظار إغلاق أي شمعة."""
         P = self.P; pip = P["pipSize"]; out = []
         if not P["touchLive"]:
             return out
         tol = P["retTolPts"] * pip
         prev = self._pcur; self._pcur = cur
         kon = {1: P["kClassic"], 2: P["kGap"], 3: P["kFlip"], 4: P["kQML"]}
-        for g in range(P["msgMaxG"] + 1):
+        for g in range(5):
             if not P["tfOn"][g]:
                 continue
             for L in self.E[g].lv:
-                if (prev is not None and L["us"] == 0 and L["pd"] == 0 and not L.get("e1") and kon[L["kd"]] and L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= P["minStars"]):
-                    sup = L["r"] == 1; p = L["p"]
-                    if (sup and prev > p >= cur) or ((not sup) and prev < p <= cur):          # عبر السعر الحي المستوى الطازج للتو
-                        L["e1"] = 1
-                        if self.allowed("touch", L, now):
-                            out.append(self.make_event("touch", g, L, now, cur, live=True))
-                if L["us"] == 2 and not L["e3"] and L["un"] < P["retestC"] + 1:
-                    sup = L["r"] == 1; p = L["p"]
-                    if (sup and p - 2 * tol <= cur <= p + tol) or ((not sup) and p - tol <= cur <= p + 2 * tol):
-                        L["e3"] = 1
-                        if self.allowed("retE", L, now):
-                            out.append(self.make_event("retE", g, L, now, cur, live=True))
+                if prev is not None and self._fresh_cross(L, kon, cur, cur, prev, cur):          # عبر السعر الحي المستوى الطازج للتو
+                    L["e1"] = 1; self._track(g, L, int(now) // 300 * 300)
+                    if g <= P["msgMaxG"] and self.allowed("touch", L, now):
+                        out.append(self.make_event("touch", g, L, now, cur, live=True))
+        for x in self.S["trk"]:
+            if x["s"] == 2 and not x["e3"] and x["n"] <= P["retestC"] and x["g"] <= P["msgMaxG"]:
+                sup = x["r"] == 1; p = x["p"]
+                if (sup and p - 2 * tol <= cur <= p + tol) or ((not sup) and p - tol <= cur <= p + 2 * tol):
+                    x["e3"] = 1
+                    if self.allowed("retE", x, now):
+                        out.append(self.make_event("retE", x["g"], x, now, cur, live=True))
         return out
 
     # ───────────── المستويات الطازجة (للقطة وتنبيهات القرب) ─────────────
