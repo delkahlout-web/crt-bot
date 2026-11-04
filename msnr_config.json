@@ -12,7 +12,8 @@
     "alertMinRankG": 2,
     "msgMaxG": 4,
     "kGap": true,
-    "minStars": 0
+    "minStars": 0,
+    "liqPips": 20.0
   },
   "plan": {}
 }

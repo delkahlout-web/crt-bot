@@ -225,7 +225,7 @@ class V4:
     def sig(self):
         """بصمة إعدادات تؤثر على بناء المستويات: إن تغيّرت (مثل تفعيل OC أو minStars) تُعاد بناء المحركات من الشموع بدل استعادة حالة قديمة."""
         P = self.P
-        return f"{int(bool(P['kGap']))}{int(bool(P['kClassic']))}{int(bool(P['kFlip']))}{int(bool(P['kQML']))}-{P['minStars']}-{int(bool(P.get('pine')))}"
+        return f"{int(bool(P['kGap']))}{int(bool(P['kClassic']))}{int(bool(P['kFlip']))}{int(bool(P['kQML']))}-{P['minStars']}-{P['liqPips']:g}-{int(bool(P.get('pine')))}"
 
     def restore(self, d):
         try:
