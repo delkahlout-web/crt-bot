@@ -220,11 +220,16 @@ class V4:
 
     # ───────────── حفظ/استعادة حالة المحرّكات (تشغيل متقطع = نفس النتيجة تماماً) ─────────────
     def dump(self):
-        return dict(ver=2, fed=list(self.fed), E=[dict(lv=e.lv, hist=e.hist, n=e.n, sh=e.lastSH, sl=e.lastSL) for e in self.E])
+        return dict(ver=2, sig=self.sig(), fed=list(self.fed), E=[dict(lv=e.lv, hist=e.hist, n=e.n, sh=e.lastSH, sl=e.lastSL) for e in self.E])
+
+    def sig(self):
+        """بصمة إعدادات تؤثر على بناء المستويات: إن تغيّرت (مثل تفعيل OC أو minStars) تُعاد بناء المحركات من الشموع بدل استعادة حالة قديمة."""
+        P = self.P
+        return f"{int(bool(P['kGap']))}{int(bool(P['kClassic']))}{int(bool(P['kFlip']))}{int(bool(P['kQML']))}-{P['minStars']}-{int(bool(P.get('pine')))}"
 
     def restore(self, d):
         try:
-            if not d or len(d["E"]) != 6 or d.get("ver") != 2:         # ver 2 = منطق مطابق للمؤشر حرفياً؛ الحالة الأقدم تُعاد بناؤها من الشموع
+            if not d or len(d["E"]) != 6 or d.get("ver") != 2 or d.get("sig") != self.sig():         # ver 2 = منطق مطابق للمؤشر حرفياً؛ الحالة الأقدم تُعاد بناؤها من الشموع
                 return False
             for e, x in zip(self.E, d["E"]):
                 e.lv = x["lv"]; e.hist = x["hist"]; e.n = x["n"]; e.lastSH = x["sh"]; e.lastSL = x["sl"]

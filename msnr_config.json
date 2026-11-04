@@ -10,7 +10,9 @@
   "v4": {
     "alertMinStars": 0,
     "alertMinRankG": 4,
-    "msgMaxG": 4
+    "msgMaxG": 4,
+    "kGap": true,
+    "minStars": 0
   },
   "plan": {}
 }
