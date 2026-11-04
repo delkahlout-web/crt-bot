@@ -170,7 +170,14 @@ START_T = time.time()
 
 def sample_spot(sym="XAU"):
     try:
-        p = float(requests.get(SPOT_URL.format(sym), timeout=8, headers={"User-Agent": "Mozilla/5.0"}).json()["price"])
+        j = requests.get(SPOT_URL.format(sym), timeout=8, headers={"User-Agent": "Mozilla/5.0"}).json()
+        p = float(j["price"])
+        try:                                                      # المصدر يحدّث السعر كل ~60 ث؛ نتجاهل سعراً أقدم من 150 ث (مصدر متجمّد)
+            up = dt.datetime.fromisoformat(str(j["updatedAt"]).replace("Z", "+00:00"))
+            if (dt.datetime.now(dt.timezone.utc) - up).total_seconds() > 150:
+                return
+        except Exception:
+            pass
         if p > 0:
             SPOT_BUF.append((time.time(), p)); del SPOT_BUF[:-6000]
     except Exception:

@@ -18,8 +18,8 @@ SECS = [604800, 86400, 14400, 3600, 1800, 900]
 DEF = dict(
     tfOn=[True, True, True, True, True, False], classicMode=0,
     kClassic=True, kGap=False, kFlip=True, kQML=True, brkN=2, minStars=1, liqPips=30.0, keepT=False, histDepth=500,
-    nPer=1, maxPerSide=3, mergeGap=20.0, minAge=0, maxDist=500.0, confOnly=False, pipSize=0.1,
-    retestC=2, retLife=40, refineOn=True, refineMax=50.0, rejOn=True, farPts=30.0, strongPts=30.0, chkHide=True,
+    pine=True, nPer=1, maxPerSide=0, mergeGap=20.0, minAge=0, maxDist=500.0, confOnly=False, pipSize=0.1,
+    retestC=2, retLife=40, refineOn=True, refineMax=50.0, rejOn=True, farPts=30.0, strongPts=30.0, chkHide=False,
     retTolPts=5.0, msgMaxG=3, dedupeH=3.0, touchLive=True, alertMinStars=2, alertMinRankG=2,
 )
 TYPE_TXT = {
@@ -193,7 +193,7 @@ class Eng4:
                 else:
                     if self.lastSL is not None and self.lastSL < c1:
                         oppP = self.lastSL
-                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=1 if ((role == 1 and broke_above) or (role == -1 and broke_below)) else 0, lq=0, wt=0,
+                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0 if P.get("pine") else (1 if ((role == 1 and broke_above) or (role == -1 and broke_below)) else 0), lq=0, wt=0,
                                us=0, um=0, un=0, ut=0, af=1 if actF else 0, ux=0, uw=None, uq=None, e3=0, e1=0))
                 if len(lv) > 60:
                     ev = next((k for k, L in enumerate(lv) if L["us"] > 0), 0)
@@ -220,11 +220,11 @@ class V4:
 
     # ───────────── حفظ/استعادة حالة المحرّكات (تشغيل متقطع = نفس النتيجة تماماً) ─────────────
     def dump(self):
-        return dict(fed=list(self.fed), E=[dict(lv=e.lv, hist=e.hist, n=e.n, sh=e.lastSH, sl=e.lastSL) for e in self.E])
+        return dict(ver=2, fed=list(self.fed), E=[dict(lv=e.lv, hist=e.hist, n=e.n, sh=e.lastSH, sl=e.lastSL) for e in self.E])
 
     def restore(self, d):
         try:
-            if not d or len(d["E"]) != 6:
+            if not d or len(d["E"]) != 6 or d.get("ver") != 2:         # ver 2 = منطق مطابق للمؤشر حرفياً؛ الحالة الأقدم تُعاد بناؤها من الشموع
                 return False
             for e, x in zip(self.E, d["E"]):
                 e.lv = x["lv"]; e.hist = x["hist"]; e.n = x["n"]; e.lastSH = x["sh"]; e.lastSL = x["sl"]
@@ -480,11 +480,11 @@ class V4:
             for _ in range(P["nPer"]):
                 best = -1; bd = 0.0
                 for i, L in enumerate(E.lv):
-                    if i in used or L["us"] != 0 or L["pd"] != 0 or E.n - L["ob"] < P["minAge"] or not kon[L["kd"]]:
+                    if i in used or L["us"] != 0 or L["pd"] != 0 or E.n - L["ob"] < P["minAge"] or (not kon[L["kd"]] and not P.get("pine")):
                         continue
                     if L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) < P["minStars"]:
                         continue
-                    if lo is not None and ((lo <= L["p"]) if L["r"] == 1 else (hi >= L["p"])):
+                    if not P.get("pine") and lo is not None and ((lo <= L["p"]) if L["r"] == 1 else (hi >= L["p"])):
                         continue
                     d = L["p"] - cur
                     if (d > 0) if side == 0 else (d < 0):
@@ -493,6 +493,8 @@ class V4:
                             best, bd = i, ad
                 if best >= 0:
                     used.add(best); L = E.lv[best]
+                    if P.get("pine") and (not kon[L["kd"]] or (lo is not None and ((lo <= L["p"]) if L["r"] == 1 else (hi >= L["p"])))):
+                        continue                                   # كالمؤشر: يُختار الأقرب أولاً ثم يُحذف المطفأ/الملموس بالشمعة الحالية دون استبدال
                     out.append(dict(p=L["p"], r=L["r"], kd=L["kd"], ts=min(L["ts"], 9), ac=L["ac"], br=L["br"], lq=L["lq"], hl=int(min(round(L["wt"] / pip), 999)),
                                     af=L["af"], o=(L["tm"] if L["kd"] >= 3 else L["og"])))
         return out
@@ -509,7 +511,7 @@ class V4:
                 wrong = (p > cur) if r == 1 else (p < cur)
                 if not near or (P["chkHide"] and wrong):
                     continue
-                hit = next((c for c in cl if abs(c["price"] - p) <= P["mergeGap"] * pip and (c["role"] == "support") == (r == 1)), None)
+                hit = next((c for c in cl if abs(c["price"] - p) <= P["mergeGap"] * pip and (P.get("pine") or (c["role"] == "support") == (r == 1))), None)
                 if hit:
                     hit["tags"].append(TFN[g]); hit["strong"] = True
                 else:
