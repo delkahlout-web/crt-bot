@@ -8,8 +8,8 @@
   "levelAlerts": true,
   "planAlerts": true,
   "v4": {
-    "alertMinStars": 0,
-    "alertMinRankG": 4,
+    "alertMinStars": 1,
+    "alertMinRankG": 2,
     "msgMaxG": 4,
     "kGap": true,
     "minStars": 0
