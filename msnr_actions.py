@@ -169,6 +169,11 @@ class Msnr:
                 return tg.send(text)
         return tg.send(text)
 
+    def subs_ok(self, stars, g, ntags):
+        """هل المستوى قوي بما يكفي ليصل للمشتركين؟ (صاحب البوت يستلم كل شيء). قوي = نجمتان فأكثر، أو W/D، أو متقاطع مع فريم آخر بنجمة."""
+        S = self.cfg.get("subs", {})
+        return stars >= S.get("minStars", 2) or g <= S.get("minRankG", 1) or (ntags >= 2 and stars >= S.get("confStars", 1))
+
     def _send(self, tg, text, at, private=False):
         if self._tgsend(tg, text, private):
             return 1
@@ -261,7 +266,7 @@ class Msnr:
             self._lat = []; self._heal = "تأخر معالجة الأحداث أكثر من 150 ثانية ثلاث مرات متتالية"     # يُعالَج بعد الإرسال (لا تضيع الرسائل)
         if self.cfg.get("levelAlerts", True):
             for e in ev4:
-                sent += self._send(tg, MG3.v4_text(e, tz, self.v4.P), e["at"])
+                sent += self._send(tg, MG3.v4_text(e, tz, self.v4.P), e["at"], private=not self.subs_ok(len(e.get("why") or ""), e.get("g", 9), str(e.get("tag", "")).count(" + ") + 1))
                 log(f"{e['kind']} {e['tag']} @ {e['p']:.2f} | السعر {e['cur']:.2f}")
         if self.cfg.get("planAlerts", True):
             for e in evp:
@@ -418,7 +423,7 @@ class Msnr:
                 continue
             if self.st["dayN"] >= self.cfg["maxAlertsPerDay"]:
                 continue
-            if tg.send(alert_text(c, cur, tz, P)):
+            if self._tgsend(tg, alert_text(c, cur, tz, P), private=not self.subs_ok(len(c.get("why") or ""), c.get("tf", 9), len(c.get("tags") or []))):
                 key = f"{c['role']}|{c['price']:.1f}"
                 for k2 in [k2 for k2, v in al.items() if v["role"] == c["role"] and abs(v["p"] - c["price"]) <= SAME_LEVEL]:
                     del al[k2]

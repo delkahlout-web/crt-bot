@@ -15,5 +15,10 @@
     "minStars": 0,
     "liqPips": 20.0
   },
-  "plan": {}
+  "plan": {},
+  "subs": {
+    "minStars": 2,
+    "minRankG": 1,
+    "confStars": 1
+  }
 }

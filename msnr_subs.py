@@ -36,15 +36,18 @@ OWNER_HELP = ("🛠 <b>لوحة التحكم</b>\n┄┄┄┄┄┄┄┄┄┄
               "<code>ت 1 60 120</code> — تجربة تصلك وحدك بلا إرسال لأحد\n"
               "<code>الغاء</code> — إلغاء آخر أمر معلّق · <code>اغلاق</code> — إغلاق آخر صفقة بالسعر الآن\n"
               "<code>تراجع</code> — إن أُعلن هدف/وقف خطأً: تعود الصفقة مفتوحة ويُعلَم الجميع\n"
+              "<code>سعر 4041.32</code> — معايرة: اكتب السعر الذي تراه الآن على منصتك فتطابقه كل أسعار الرسائل · <code>سعر</code> تعرض الحالة · <code>سعر صفر</code> تلغيها\n"
               "الهدف والوقف يُتابَعان تلقائيًا ويصل «مبروك» أو «بنعوّض» للجميع.\n"
               "✍️ أي رسالة عادية تكتبها هنا (نص أو صورة أو صوت) تصل لكل المشتركين فورًا.\n"
               "/map — خريطة المناطق\n/health — حالة النظام الآن")
 _N = r"(\d+(?:\.\d+)?)"; _SEP = r"\s*[\s,،/]+\s*"
 _TRADE = re.compile(rf"^\s*(ت|تجربة|t|test)?\s*[:\-]?\s*([12])(?:{_SEP}{_N}(?:{_SEP}{_N}(?:{_SEP}{_N})?)?)?\s*$", re.I)
 _SET = re.compile(rf"^\s*(?:ضبط|اعدادات|إعدادات)\s+{_N}{_SEP}{_N}(?:{_SEP}{_N})?\s*$")
+_CAL = re.compile(r"^\s*(?:سعر|معايرة)(?:\s+(\d{4,5}(?:\.\d+)?|صفر))?\s*$")
 _TCMD = re.compile(r"^\s*(الغاء|إلغاء|اغلاق|إغلاق|تراجع)\s*$")
 _TRYTRADE = re.compile(r"^\s*(ت|تجربة|t|test)?\s*[:\-]?\s*[12]\b[\d\s.,،/]*$", re.I)
 _CONTENT = ("text", "photo", "video", "voice", "audio", "document", "sticker", "animation", "video_note", "location", "poll", "contact")
+_PRICE = re.compile(r"(<(?:code|b)>)(\d{4,5}\.\d{2})(</(?:code|b)>)")
 _DIG = str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
 
 
@@ -65,6 +68,8 @@ class Broadcast:
         self.price_fn = None                                         # دالة ← (السعر الفوري, وقته)؛ تُفعِّل التوصيات اليدوية «1 60 120» من صاحب البوت مباشرة
         self.tz = "Asia/Hebron"
         state.setdefault("mtr", [])
+        state.setdefault("pshift", 0.0)                              # معايرة الأسعار: فرق (سعر وسيطك − سعر البوت) يُضاف لكل الأسعار الظاهرة
+        self._pt = False; self._pth = None
         state.setdefault("mdef", dict(sl=30.0, tp=100.0, sp=3.0))      # القيم الافتراضية للتوصية: وقف 30 · هدف 100 · سبريد 3 نقاط
         self.base = tg.base; self.token = tg.token; self.chat_id = tg.chat_id
         self._lock = threading.Lock(); self._menu = False
@@ -78,7 +83,19 @@ class Broadcast:
             st.clear(); st["day"] = day
         st[key] = st.get(key, 0) + n
 
+    def _px(self, text):
+        """يُزيح كل الأسعار الظاهرة (داخل <code> أو <b>) بفرق المعايرة ليطابق سعر وسيط صاحب البوت."""
+        sh = float(self.state.get("pshift") or 0.0)
+        if abs(sh) < 1e-9:
+            return text
+
+        def f(m):
+            v = float(m.group(2))
+            return m.group(1) + f"{v + sh:.2f}" + m.group(3) if 1000 <= v <= 20000 else m.group(0)
+        return _PRICE.sub(f, text)
+
     def send(self, text, silent=False, private=False):
+        text = self._px(text)
         if not private:
             self.fanout(text, silent)
             self.bump("msgs")
@@ -289,12 +306,33 @@ class Broadcast:
             head = self._say(f"أمر معلّق — {act} الذهب عند <b>{e:.2f}</b> {'🟢' if buy else '🔴'}")
             text = self._card(x, head, f"\n💲 السعر الآن <code>{px:.2f}</code> — نخبركم لحظة تفعيل الأمر")
         if test:
-            self._post(cid, "🧪 <b>تجربة — وصلتك وحدك ولم تُرسل لأحد</b>\n\n" + text)
+            self._post(cid, "🧪 <b>تجربة — وصلتك وحدك ولم تُرسل لأحد</b>\n\n" + self._px(text))
             return
         self.state["mtr"].append(x); self.dirty = True
         self.send(text)
         self._post(cid, f"✅ أُرسلت لـ {len([c for c in self.subs if c != str(self.chat_id)])} مشترك · أتابع الوقف والهدف تلقائيًا", silent=True)
         self.log(f"توصية يدوية: {'شراء' if buy else 'بيع'} {x['st']} @ {e:.2f} وقف {sl:g} هدف {tp:g}")
+
+    def _calibrate(self, cid, arg):
+        """«سعر 4041.32» = السعر الذي تراه الآن على منصتك: يحسب البوت الفرق ويُزيح به كل الأسعار الظاهرة. «سعر» وحدها تعرض الحالة، و«سعر صفر» تلغي المعايرة."""
+        pr = self.price_fn() if self.price_fn else None
+        if not pr or time.time() - pr[1] > 60:
+            self._post(cid, "⚠️ لا يوجد سعر حديث الآن. أعد المحاولة بعد لحظات.")
+            return
+        cur = pr[0]; sh = float(self.state.get("pshift") or 0.0)
+        if arg is None:
+            self._post(cid, f"📐 المعايرة الحالية: <b>{sh:+.2f}$</b>\nسعر البوت الآن (بعد المعايرة): <code>{cur + sh:.2f}</code>\nاكتب <code>سعر</code> ثم السعر الذي تراه على منصتك لتضبطها، مثال: <code>سعر 4041.32</code>", silent=True)
+            return
+        if arg == "صفر":
+            self.state["pshift"] = 0.0; self.dirty = True
+            self._post(cid, "✅ أُلغيت المعايرة: الأسعار كما يراها البوت.", silent=True)
+            return
+        x = float(arg)
+        if not 1000 < x < 20000 or abs(x - cur) > 15:
+            self._post(cid, f"⚠️ الرقم بعيد عن سعر البوت ({cur:.2f}). تأكد منه وأعد الكتابة.")
+            return
+        self.state["pshift"] = round(x - cur, 3); self.dirty = True
+        self._post(cid, f"✅ ضُبطت المعايرة: فرق منصتك عن مصدر البوت <b>{x - cur:+.2f}$</b>.\nمن الآن كل الأسعار في الرسائل تطابق منصتك عند <code>{x:.2f}</code>. أعد المعايرة (<code>سعر ...</code>) متى لاحظت فرقًا.", silent=True)
 
     def _trade_cmd(self, cid, word):
         """«الغاء» يلغي آخر أمر معلّق، و«اغلاق» يغلق آخر صفقة مفتوحة بالسعر الآن، ويُعلَم المشتركون."""
@@ -374,12 +412,31 @@ class Broadcast:
             self.log(f"قائمة الأوامر: {ex}")
 
     # ───────────── قراءة التحديثات ─────────────
-    def poll(self):
-        """يقرأ رسائل المستخدمين وضغطات الأزرار الجديدة. استدعاء خفيف (بلا انتظار طويل)."""
+    def start_poll_thread(self):
+        """خيط مخصّص لتلقّي الرسائل بالاستطلاع الطويل: أوامر صاحب البوت (مثل «1») تُنفَّذ خلال ~ثانية بدل 5–8 ثوانٍ فيُؤخذ السعر لحظتها."""
+        if self._pt:
+            return
+        self._pt = True
+
+        def run():
+            while True:
+                t0 = time.time()
+                try:
+                    self.poll(wait=20)
+                except Exception as ex:
+                    self.log(f"خيط الاستطلاع: {ex}"); time.sleep(2)
+                if time.time() - t0 < 0.5:                                  # ردّ فوري (خطأ/لا شيء): لا تُغرق تلجرام بطلبات متتالية
+                    time.sleep(1.0)
+        self._pth = threading.Thread(target=run, daemon=True); self._pth.start()
+
+    def poll(self, wait=0):
+        """يقرأ رسائل المستخدمين وضغطات الأزرار الجديدة. مع الخيط المخصّص تتجاهل استدعاءات الحلقة الرئيسية."""
+        if self._pt and threading.current_thread() is not self._pth:
+            return
         try:
             self._set_menu()
-            r = requests.get(self.base + "/getUpdates", params={"offset": int(self.state.get("upd", 0)) + 1, "timeout": 0,
-                                                                "allowed_updates": json.dumps(["message", "callback_query", "message_reaction"])}, timeout=8)
+            r = requests.get(self.base + "/getUpdates", params={"offset": int(self.state.get("upd", 0)) + 1, "timeout": wait,
+                                                                "allowed_updates": json.dumps(["message", "callback_query", "message_reaction"])}, timeout=wait + 8)
             if not r.ok:
                 return
             for u in r.json().get("result", []):
@@ -401,6 +458,10 @@ class Broadcast:
                     ms = _SET.match(text.translate(_DIG))
                     if ms:
                         self._settings(str(chat.get("id")), float(ms.group(1)), float(ms.group(2)), float(ms.group(3)) if ms.group(3) else None)
+                        continue
+                    mcal = _CAL.match(text.translate(_DIG))
+                    if mcal:
+                        self._calibrate(str(chat.get("id")), mcal.group(1))
                         continue
                     mc = _TCMD.match(text)
                     if mc:
@@ -440,7 +501,7 @@ class Broadcast:
                         self._post(cid, "تم إلغاء اشتراكك. أرسل /start متى شئت للعودة.")
                 elif cmd in self.handlers:
                     try:
-                        self._post(cid, self.handlers[cmd]())
+                        self._post(cid, self._px(self.handlers[cmd]()))
                     except Exception as exh:
                         self.log(f"أمر {cmd}: {exh}")
                 elif cmd == "/status":

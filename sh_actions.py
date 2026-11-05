@@ -43,7 +43,12 @@ def save_state(st):
     if SQ.get("delta") is not None:
         st["sqd"] = round(SQ["delta"], 3)                       # فرق Swissquote↔gold-api المحفوظ ليبدأ التشغيل التالي دافئاً
     tmp = STATE_PATH + ".tmp"                                   # كتابة ذرّية: لا يقرأ git ملفاً نصف مكتوب
-    json.dump(st, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    for _ in range(4):                                          # الحالة قد يعدّلها خيط الاستقبال أثناء الكتابة: أعد المحاولة
+        try:
+            json.dump(st, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+            break
+        except RuntimeError:
+            time.sleep(0.05)
     os.replace(tmp, STATE_PATH)
 
 
@@ -185,6 +190,19 @@ def sq_mid():
     except Exception:
         pass
     SQ["fail"] += 1
+    return None
+
+
+def fresh_price():
+    """(السعر الآن، وقته): قراءة لحظية من Swissquote بمقياس البوت، أو آخر عيّنة حديثة إن تعذّر."""
+    m = sq_mid()
+    if m is not None and SQ["delta"] is not None and abs(SQ["delta"]) < 25:
+        q = m + SQ["delta"]; t = time.time()
+        if not SPOT_BUF or abs(q - SPOT_BUF[-1][1]) < 15:
+            SPOT_BUF.append((t, q)); del SPOT_BUF[:-6000]
+            return q, t
+    if SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 60:
+        return SPOT_BUF[-1][1], SPOT_BUF[-1][0]
     return None
 
 
@@ -520,7 +538,9 @@ def main():
         tg.owner_handlers["/health"] = lambda: health_text(state, tg, MS, cfg.get("displayTz", "Asia/Hebron"))
         tg.bump("starts")
 
-        tg.price_fn = lambda: (SPOT_BUF[-1][1], SPOT_BUF[-1][0]) if SPOT_BUF else None
+        tg.price_fn = fresh_price                               # سعر لحظي وقت تنفيذ الأمر (Swissquote) لا آخر عيّنة قديمة
+        if hasattr(tg, "start_poll_thread"):
+            tg.start_poll_thread()                              # استقبال فوري لأوامر صاحب البوت
         tg.tz = cfg.get("displayTz", "Asia/Hebron")
     yh1 ={"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
