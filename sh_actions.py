@@ -40,6 +40,8 @@ def load_state():
 
 def save_state(st):
     st["sent"] = st["sent"][-800:]
+    if SQ.get("delta") is not None:
+        st["sqd"] = round(SQ["delta"], 3)                       # فرق Swissquote↔gold-api المحفوظ ليبدأ التشغيل التالي دافئاً
     tmp = STATE_PATH + ".tmp"                                   # كتابة ذرّية: لا يقرأ git ملفاً نصف مكتوب
     json.dump(st, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     os.replace(tmp, STATE_PATH)
@@ -168,20 +170,53 @@ SPOT_BUF = []                 # (epoch, price) عينات gold-api لبناء ش
 START_T = time.time()
 
 
-def sample_spot(sym="XAU"):
+SQ_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
+SQ = {"delta": None, "pairs": [], "ok": 0, "fail": 0, "t": 0.0, "up": None, "used": 0}      # مصدر لحظي (Swissquote): فرق ثابت عن gold-api لإبقاء مقياس الأسعار كما هو
+
+
+def sq_mid():
+    """منتصف سعر البيع/الشراء اللحظي من Swissquote (يتحدّث كل ثانيتين تقريباً) أو None."""
     try:
-        j = requests.get(SPOT_URL.format(sym), timeout=8, headers={"User-Agent": "Mozilla/5.0"}).json()
-        p = float(j["price"])
-        try:                                                      # المصدر يحدّث السعر كل ~60 ث؛ نتجاهل سعراً أقدم من 150 ث (مصدر متجمّد)
-            up = dt.datetime.fromisoformat(str(j["updatedAt"]).replace("Z", "+00:00"))
-            if (dt.datetime.now(dt.timezone.utc) - up).total_seconds() > 150:
-                return
-        except Exception:
-            pass
-        if p > 0:
-            SPOT_BUF.append((time.time(), p)); del SPOT_BUF[:-6000]
+        pr = requests.get(SQ_URL, timeout=3, headers={"User-Agent": "Mozilla/5.0"}).json()[0]["spreadProfilePrices"][0]
+        m = (float(pr["bid"]) + float(pr["ask"])) / 2
+        if m > 0:
+            SQ["ok"] += 1; SQ["t"] = time.time()
+            return m
     except Exception:
         pass
+    SQ["fail"] += 1
+    return None
+
+
+def sample_spot(sym="XAU"):
+    """عيّنة سعر كل ~4 ث. gold-api يتحدّث كل ~60 ث فتضيع قمم/قيعان الشموع؛ لذا نضيف عيّنات Swissquote اللحظية بعد إزاحتها بالفرق الوسيط
+    بين المصدرين (يُقاس عند كل تحديث جديد لـ gold-api) فتبقى مستويات الشموع المحفوظة صحيحة. إن تعذّر Swissquote نعود لـ gold-api وحده."""
+    p = None; age = None; up = None
+    try:
+        j = requests.get(SPOT_URL.format(sym), timeout=8, headers={"User-Agent": "Mozilla/5.0"}).json()
+        p = float(j["price"]); up = j.get("updatedAt")
+        try:                                                      # المصدر يحدّث السعر كل ~60 ث؛ نتجاهل سعراً أقدم من 150 ث (مصدر متجمّد)
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(str(up).replace("Z", "+00:00"))).total_seconds()
+            if age > 150:
+                p = None
+        except Exception:
+            pass
+        if p is not None and p <= 0:
+            p = None
+    except Exception:
+        p = None
+    m = sq_mid()
+    if m is not None and p is not None and up and up != SQ["up"] and age is not None and age <= 12:      # تحديث جديد لـ gold-api: القياس الآن دقيق
+        SQ["up"] = up; SQ["pairs"] = (SQ["pairs"] + [p - m])[-30:]
+        if len(SQ["pairs"]) >= 5:
+            s_ = sorted(SQ["pairs"]); SQ["delta"] = s_[len(s_) // 2]
+    if m is not None and SQ["delta"] is not None and abs(SQ["delta"]) < 25:
+        q = m + SQ["delta"]
+        if not SPOT_BUF or abs(q - SPOT_BUF[-1][1]) < 15:         # حماية من قراءة شاذة
+            SPOT_BUF.append((time.time(), q)); del SPOT_BUF[:-6000]; SQ["used"] += 1
+            return
+    if p is not None:
+        SPOT_BUF.append((time.time(), p)); del SPOT_BUF[:-6000]
 
 
 def spot_bars(now):
@@ -413,6 +448,8 @@ def health_text(state, tg, MS, tz):
             f"🧮 تأخير المعالجة الأخير: {lat}",
             f"👥 مشتركون: {len(state.get('subs', {}))}  ·  محظورون: {len(state.get('banned', {}))}",
             f"🎯 صفقات الجلسة: {pl.get('w', 0)} رابحة / {pl.get('l', 0)} خاسرة"]
+    live_q = SQ["ok"] > 0 and now - SQ["t"] < 30 and SQ["delta"] is not None
+    rows.append(("📡 مصدر السعر: Swissquote لحظي (فرق عن gold-api " + f"{SQ['delta']:+.2f}$)" if live_q else "📡 مصدر السعر: gold-api (Swissquote غير متاح)") + f"  ·  عيّنات لحظية {SQ['used']} · إخفاقات {SQ['fail']}")
     au = MS.st.get("audit") if MS is not None else None
     if au:
         rows.append(f"🔎 آخر فحص ذاتي: قبل {(now - au['t']) / 60:.0f} د — " + ("سليم" if au["ok"] else "ملاحظات: " + " | ".join(au["bad"][:3])) + f"  ({au['n']} مستوى مسجّل)")
@@ -464,6 +501,8 @@ def main():
     handover = False
     sent = set(state["sent"])
     PERSIST.update({int(b["time"]): b for b in state.get("spot", [])})
+    if SQ["delta"] is None and isinstance(state.get("sqd"), (int, float)):
+        SQ["delta"] = float(state["sqd"])
     try:
         import msnr_actions as MA
         MS = MA.Msnr()
