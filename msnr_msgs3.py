@@ -148,12 +148,22 @@ def map_text(m, cur, tz, title="خريطة المناطق"):
         icon = "🟥" if c["role"] == "resistance" else "🟩"
         reasons = " · ".join(WHY[x] for x in c["why"])
         multi = " ✓متعدد" if len(c["tags"]) > 1 else ""
-        return (f"{icon} <code>{c['price']:.2f}</code> ({c['price'] - cur:+.1f}$)  {fmt_tags(c['tags'])} {c['kind']}  {stars(c['why'])}"
+        ts = " ✅TS" if c.get("vl") and str(c.get("kind", "")).startswith("Classic") else ""
+        return (f"{icon} <code>{c['price']:.2f}</code> ({c['price'] - cur:+.1f}$)  {fmt_tags(c['tags'])} {c['kind']}{ts}  {stars(c['why'])}"
                 + (f" ({reasons})" if reasons else "") + (f" 💧{c['hl']}" if c.get("hl") else "") + multi)
     res = sorted(m.get("resistance", []), key=lambda c: -c["price"]); sup = sorted(m.get("support", []), key=lambda c: -c["price"])
     lines = [f"{TOP}", f"🗺 <b>{title}</b> · أقوى المستويات", SEP]
     lines += [row(c) for c in res] or ["— لا مقاومات —"]
     lines += [f"━━ السعر الآن <code>{cur:.2f}</code> ━━"]
     lines += [row(c) for c in sup] or ["— لا دعوم —"]
-    lines += [SEP, f"🕒 {hm(time.time(), tz)}", "<i>الأقوى أولاً: نجوم + تقاطع فريمات + رتبة الفريم. أرسل /map لتحديثها في أي وقت.</i>"]
+    erl = m.get("erl") or {}; irl = m.get("irl") or {}
+    if any(erl.values()) or any(irl.values()):
+        def p1(v):
+            return "—" if v is None else f"<code>{v:.2f}</code>"
+
+        def z1(z):
+            return "—" if z is None else f"<code>{z[0]:.2f}</code>–<code>{z[1]:.2f}</code>"
+        lines += [SEP, f"🧲 <b>ERL</b> (سيولة خارجية)  فوق {p1(erl.get('up'))}  ·  تحت {p1(erl.get('dn'))}",
+                  f"🕳 <b>IRL</b> (فجوة FVG)  فوق {z1(irl.get('up'))}  ·  تحت {z1(irl.get('dn'))}"]
+    lines += [SEP, f"🕒 {hm(time.time(), tz)}", "<i>الأقوى أولاً: نجوم + تقاطع فريمات + رتبة الفريم. ✅TS = مستوى كلاسيكي صالح (الشمعة الثانية كسحت ذيل الأولى): للقراءة فقط. أرسل /map لتحديثها في أي وقت.</i>"]
     return "\n".join(lines)

@@ -141,7 +141,7 @@ class Eng3:
                 else:
                     if self.lastSL is not None and self.lastSL < c1:
                         oppP = self.lastSL
-                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0, lq=0, wt=0, rt=0, af=1 if actF else 0))
+                lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0, lq=0, wt=0, rt=0, af=1 if actF else 0, vl=((1 if h1 >= h2 else 0) if role == -1 else (1 if l1 <= l2 else 0)) if kind == 1 else 0))
                 if len(lv) > P.get("maxLv", 60):
                     lv.pop(0)
 
@@ -167,7 +167,7 @@ class Eng3:
                 if best >= 0:
                     used.add(best); L = self.lv[best]
                     out.append(dict(p=L["p"], r=L["r"], kd=L["kd"], ts=min(L["ts"], 9), stc=L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0), ac=L["ac"], br=L["br"], lq=L["lq"],
-                                    hl=int(min(round(L["wt"] / pip), 999)), rt=L["rt"], af=L["af"],
+                                    hl=int(min(round(L["wt"] / pip), 999)), rt=L["rt"], af=L["af"], vl=L.get("vl", 0),
                                     o=(L["tm"] if (P["flipFromBreak"] and L["kd"] >= 3) else L["og"])))
         return out
 

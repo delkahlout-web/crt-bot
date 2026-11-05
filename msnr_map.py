@@ -9,7 +9,7 @@ import msnr_v3 as V3
 
 TFN = ["W", "D", "4H", "1H", "30M"]
 RANK = [4, 3, 2, 1, 0]
-PM = {**V3.DEF, "maxLv": 300, "nPer": 5, "minStars": 1, "mapCount": 6, "histDepth": 1500}
+PM = {**V3.DEF, "maxLv": 300, "nPer": 5, "minStars": 1, "mapCount": 6, "histDepth": 1500, "tsOnly": False, "erlIrl": True, "erlIrlTf": 4, "swingLen": 5, "fvgMin": 15.0}
 
 
 class LevelMap:
@@ -55,7 +55,7 @@ class LevelMap:
                 p = L["p"]; r = L["r"]
                 used0 = lo is not None and ((lo <= p) if r == 1 else (hi >= p))
                 wrong = (p > cur) if r == 1 else (p < cur)
-                if not kon[L["kd"]] or used0 or (P["chkHide"] and wrong):
+                if not kon[L["kd"]] or used0 or (P["chkHide"] and wrong) or (P["tsOnly"] and L["kd"] == 1 and not L.get("vl")):
                     continue
                 hit = next((c for c in cl if abs(c["price"] - p) <= P["mergeGap"] * pip and (c["role"] == "support") == (r == 1)), None)
                 if hit:
@@ -63,7 +63,7 @@ class LevelMap:
                 else:
                     why = ("A" if L["ac"] else "") + ("B" if L["br"] else "") + ("L" if L["lq"] > 0 else "")
                     cl.append(dict(price=p, role="support" if r == 1 else "resistance", tags=[TFN[g]], kd=L["kd"], kind=_kind(L["kd"], r), why=why,
-                                   hl=L["hl"], af=0, rank=RANK[g], tests=L["ts"]))
+                                   hl=L["hl"], af=0, rank=RANK[g], tests=L["ts"], vl=L.get("vl", 0)))
         for c in cl:
             c["key"] = len(c["why"]) * 10 + (5 if len(c["tags"]) > 1 else 0) + c["rank"]
         out = {}
@@ -71,6 +71,48 @@ class LevelMap:
             side = [c for c in cl if c["role"] == role]
             side.sort(key=lambda c: (-c["key"], abs(c["price"] - cur)))
             out[role] = side[:P["mapCount"]]
+        if P.get("erlIrl"):
+            try:
+                out.update(self.erl_irl(cur))
+            except Exception:
+                pass
+        return out
+
+    def erl_irl(self, cur):
+        """ERL = أقرب قمة/قاع خارجي لم يُكسر · IRL = أقرب فجوة قيمة عادلة (FVG) لم تُملأ، على فريم العرض (30M افتراضيًا) كما في المؤشر."""
+        P = self.P; pip = P["pipSize"]; Ln = int(P["swingLen"]); gmin = P["fvgMin"] * pip; g = int(P["erlIrlTf"])
+        bars = self.cl[g][:self.ptr[g]][-700:]; n = len(bars)
+        out = dict(erl=dict(up=None, dn=None), irl=dict(up=None, dn=None))
+        if n < 2 * Ln + 3:
+            return out
+        hs = [b["high"] for b in bars]; ls = [b["low"] for b in bars]
+        sufmax = [0.0] * (n + 1); sufmin = [1e18] * (n + 1)
+        for i in range(n - 1, -1, -1):
+            sufmax[i] = max(hs[i], sufmax[i + 1]); sufmin[i] = min(ls[i], sufmin[i + 1])
+        lv = []
+        for i in range(Ln, n - Ln):
+            if hs[i] >= max(hs[i - Ln:i + Ln + 1]) and hs[i] > max(hs[i - Ln:i]) and sufmax[i + 1] <= hs[i]:
+                lv.append(hs[i])
+            if ls[i] <= min(ls[i - Ln:i + Ln + 1]) and ls[i] < min(ls[i - Ln:i]) and sufmin[i + 1] >= ls[i]:
+                lv.append(ls[i])
+        ups = [p for p in lv if p > cur]; dns = [p for p in lv if p < cur]
+        out["erl"]["up"] = min(ups) if ups else None; out["erl"]["dn"] = max(dns) if dns else None
+        fv = []
+        for j in range(2, n):
+            if bars[j]["low"] > bars[j - 2]["high"] and bars[j]["low"] - bars[j - 2]["high"] >= gmin:
+                fv.append((j, 1, bars[j - 2]["high"], bars[j]["low"]))
+            if bars[j]["high"] < bars[j - 2]["low"] and bars[j - 2]["low"] - bars[j]["high"] >= gmin:
+                fv.append((j, -1, bars[j]["high"], bars[j - 2]["low"]))
+        alive = []
+        for j, t, bot, top in fv:
+            later = bars[j + 1:]
+            if (t == 1 and any(b["close"] < bot for b in later)) or (t == -1 and any(b["close"] > top for b in later)):
+                continue
+            alive.append((bot, top))
+        alive = alive[-60:]
+        up = [z for z in alive if z[0] > cur]; dn = [z for z in alive if z[1] < cur]
+        out["irl"]["up"] = min(up, key=lambda z: z[0] - cur) if up else None
+        out["irl"]["dn"] = min(dn, key=lambda z: cur - z[1]) if dn else None
         return out
 
 

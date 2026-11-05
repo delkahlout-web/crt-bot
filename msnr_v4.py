@@ -194,7 +194,8 @@ class Eng4:
                     if self.lastSL is not None and self.lastSL < c1:
                         oppP = self.lastSL
                 lv.append(dict(p=lp, r=role, kd=kind, tm=t1, bk=0, og=ot, ob=b, ts=0, pd=0, lb=0, ac=1 if act else 0, op=oppP, br=0 if P.get("pine") else (1 if ((role == 1 and broke_above) or (role == -1 and broke_below)) else 0), lq=0, wt=0,
-                               us=0, um=0, un=0, ut=0, af=1 if actF else 0, ux=0, uw=None, uq=None, e3=0, e1=0))
+                               us=0, um=0, un=0, ut=0, af=1 if actF else 0, ux=0, uw=None, uq=None, e3=0, e1=0,
+                               vl=((1 if h1 >= h2 else 0) if role == -1 else (1 if l1 <= l2 else 0)) if kind == 1 else 0))
                 if len(lv) > 60:
                     ev = next((k for k, L in enumerate(lv) if L["us"] > 0), 0)
                     lv.pop(ev)
@@ -225,7 +226,7 @@ class V4:
     def sig(self):
         """بصمة إعدادات تؤثر على بناء المستويات: إن تغيّرت (مثل تفعيل OC أو minStars) تُعاد بناء المحركات من الشموع بدل استعادة حالة قديمة."""
         P = self.P
-        return f"{int(bool(P['kGap']))}{int(bool(P['kClassic']))}{int(bool(P['kFlip']))}{int(bool(P['kQML']))}-{P['minStars']}-{P['liqPips']:g}-{int(bool(P.get('pine')))}"
+        return f"{int(bool(P['kGap']))}{int(bool(P['kClassic']))}{int(bool(P['kFlip']))}{int(bool(P['kQML']))}-{P['minStars']}-{P['liqPips']:g}-{int(bool(P.get('pine')))}-t1"
 
     def restore(self, d):
         try:
@@ -301,7 +302,7 @@ class V4:
 
     def tag_of(self, g, L):
         w = why_of(L)
-        return f"{TFN[g]} {kind_short(L['kd'], L['r'])}" + (" " + "★" * len(w) + f" [{w}]" if w else "")
+        return f"{TFN[g]} {kind_short(L['kd'], L['r'])}" + (" " + "★" * len(w) + f" [{w}]" if w else "") + (" TS" if L["kd"] == 1 and L.get("vl") else "")
 
     def zone(self, L):
         t = L.get("ux") or 0; p = L["p"]; w = L.get("uw"); c = L.get("uq")
@@ -501,7 +502,7 @@ class V4:
                     if P.get("pine") and (not kon[L["kd"]] or (lo is not None and ((lo <= L["p"]) if L["r"] == 1 else (hi >= L["p"])))):
                         continue                                   # كالمؤشر: يُختار الأقرب أولاً ثم يُحذف المطفأ/الملموس بالشمعة الحالية دون استبدال
                     out.append(dict(p=L["p"], r=L["r"], kd=L["kd"], ts=min(L["ts"], 9), ac=L["ac"], br=L["br"], lq=L["lq"], hl=int(min(round(L["wt"] / pip), 999)),
-                                    af=L["af"], o=(L["tm"] if L["kd"] >= 3 else L["og"])))
+                                    af=L["af"], vl=L.get("vl", 0), o=(L["tm"] if L["kd"] >= 3 else L["og"])))
         return out
 
     def shown(self, cur, now=None):
