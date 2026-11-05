@@ -159,10 +159,20 @@ class Msnr:
         log(f"جاهز: 1H={len(self.h1)} 30M={len(self.m30)} 15M={len(self.m15)} | مستويات v4 + خطة الجلسة | alertPts={self.cfg['alertPts']:g} rearmPts={self.cfg['rearmPts']:g}")
 
     # ───────────── إرسال ─────────────
-    def _send(self, tg, text, at):
-        if tg.send(text):
+    @staticmethod
+    def _tgsend(tg, text, private=False):
+        """private=True: لصاحب البوت وحده (لا يصل للمشتركين)."""
+        if private:
+            try:
+                return tg.send(text, private=True)
+            except TypeError:
+                return tg.send(text)
+        return tg.send(text)
+
+    def _send(self, tg, text, at, private=False):
+        if self._tgsend(tg, text, private):
             return 1
-        self.st.setdefault("outbox", []).append(dict(t=at, text=text))
+        self.st.setdefault("outbox", []).append(dict(t=at, text=text, p=bool(private)))
         return 0
 
     def _persist(self):
@@ -255,7 +265,7 @@ class Msnr:
                 log(f"{e['kind']} {e['tag']} @ {e['p']:.2f} | السعر {e['cur']:.2f}")
         if self.cfg.get("planAlerts", True):
             for e in evp:
-                sent += self._send(tg, MG3.plan_text(e, tz, self.plan.P), e["at"])
+                sent += self._send(tg, MG3.plan_text(e, tz, self.plan.P), e["at"], private=True)         # صفقات الجلسة تصل لصاحب البوت وحده
                 log(f"خطة الجلسة: {e['kind']} {e.get('res', '')} {'شراء' if e['dir'] == 1 else 'بيع'} @ {e['entry']:.2f}")
         return sent
 
@@ -353,7 +363,7 @@ class Msnr:
         for m in self.st.setdefault("outbox", []):
             if now - m["t"] > 3 * 3600:
                 continue
-            if not keep and tg.send(m["text"]):
+            if not keep and self._tgsend(tg, m["text"], m.get("p", False)):
                 sent += 1
             else:
                 keep.append(m)
