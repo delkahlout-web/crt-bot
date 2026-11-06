@@ -20,7 +20,7 @@ DEF = dict(
     kClassic=True, kGap=False, kFlip=True, kQML=True, brkN=2, minStars=1, liqPips=30.0, keepT=False, histDepth=500,
     pine=True, nPer=1, maxPerSide=0, mergeGap=20.0, minAge=0, maxDist=500.0, confOnly=False, pipSize=0.1,
     retestC=2, retLife=40, refineOn=True, refineMax=50.0, rejOn=True, farPts=30.0, strongPts=30.0, chkHide=False,
-    retTolPts=5.0, msgMaxG=3, dedupeH=3.0, touchLive=True, alertMinStars=2, alertMinRankG=2,
+    retTolPts=5.0, msgMaxG=3, dedupeH=3.0, touchLive=True, alertMinStars=2, alertMinRankG=2, confMinStars=1, rankMinStars=1,
 )
 TYPE_TXT = {
     1: "ذيل ضعيف + إغلاق قريب: يُتوقَّع سحب سيولة قمة الذيل أولاً — لا تدخل فوراً، ابحث عن Refine عند/فوق الذيل",
@@ -375,13 +375,14 @@ class V4:
     def strong(self, g, L):
         """فلتر القوة: مستوى بنجمتين فأكثر، أو فريم 4H فما فوق، أو متقاطع مع مستوى من فريم آخر عند السعر نفسه."""
         P = self.P
-        if L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0) >= P["alertMinStars"] or g <= P["alertMinRankG"]:
+        st_ = L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0)
+        if st_ >= P["alertMinStars"] or (g <= P["alertMinRankG"] and st_ >= P["rankMinStars"]):          # فريم كبير بلا نجوم (مثل OC) لا يكفي وحده
             return True
         mg = P["mergeGap"] * P["pipSize"]
         for k in range(5):
             if k != g and P["tfOn"][k]:
                 for M in self.E[k].lv:
-                    if M["r"] == L["r"] and abs(M["p"] - L["p"]) <= mg and M["us"] == 0 and M["ac"] + M["br"] + (1 if M["lq"] > 0 else 0) >= P["minStars"]:
+                    if M["r"] == L["r"] and abs(M["p"] - L["p"]) <= mg and M["us"] == 0 and M["ac"] + M["br"] + (1 if M["lq"] > 0 else 0) >= P["confMinStars"]:
                         return True
         return False
 
@@ -519,10 +520,12 @@ class V4:
                     continue
                 hit = next((c for c in cl if abs(c["price"] - p) <= P["mergeGap"] * pip and (P.get("pine") or (c["role"] == "support") == (r == 1))), None)
                 if hit:
-                    hit["tags"].append(TFN[g]); hit["strong"] = True
+                    hit["tags"].append(TFN[g])
+                    if max(hit.get("stars", 0), L["ac"] + L["br"] + (1 if L["lq"] > 0 else 0)) >= P["confMinStars"]:        # التقاطع لا يُقوّي إلا إن كان أحد المستويين بنجمة على الأقل
+                        hit["strong"] = True
                 else:
                     w = ("A" if L["ac"] else "") + ("B" if L["br"] else "") + ("L" if L["lq"] > 0 else "")
-                    cl.append(dict(strong=(len(w) >= P["alertMinStars"] or g <= P["alertMinRankG"]), price=p, role="support" if r == 1 else "resistance", tags=[TFN[g]], kd=L["kd"], kind=kind_name(L["kd"], r),
+                    cl.append(dict(strong=(len(w) >= P["alertMinStars"] or (g <= P["alertMinRankG"] and len(w) >= P["rankMinStars"])), price=p, role="support" if r == 1 else "resistance", tags=[TFN[g]], kd=L["kd"], kind=kind_name(L["kd"], r),
                                    marks=("★" * len(w)), why=w, hl=L["hl"], stars=len(w), tests=L["ts"], af=L["af"], tf=g))
         if P["confOnly"]:
             cl = [c for c in cl if len(c["tags"]) > 1]

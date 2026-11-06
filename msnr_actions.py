@@ -172,7 +172,7 @@ class Msnr:
     def subs_ok(self, stars, g, ntags):
         """هل المستوى قوي بما يكفي ليصل للمشتركين؟ (صاحب البوت يستلم كل شيء). قوي = نجمتان فأكثر، أو W/D، أو متقاطع مع فريم آخر بنجمة."""
         S = self.cfg.get("subs", {})
-        return stars >= S.get("minStars", 2) or g <= S.get("minRankG", 1) or (ntags >= 2 and stars >= S.get("confStars", 1))
+        return stars >= S.get("minStars", 3) or (g <= S.get("minRankG", 1) and stars >= S.get("rankStars", 2)) or (ntags >= 2 and stars >= S.get("confStars", 2))
 
     def _send(self, tg, text, at, private=False):
         if self._tgsend(tg, text, private):

@@ -8,17 +8,20 @@
   "levelAlerts": true,
   "planAlerts": true,
   "v4": {
-    "alertMinStars": 1,
+    "alertMinStars": 2,
     "alertMinRankG": 2,
     "msgMaxG": 4,
     "kGap": true,
     "minStars": 0,
-    "liqPips": 20.0
+    "liqPips": 20.0,
+    "rankMinStars": 1,
+    "confMinStars": 1
   },
   "plan": {},
   "subs": {
-    "minStars": 2,
+    "minStars": 3,
     "minRankG": 1,
-    "confStars": 1
+    "rankStars": 2,
+    "confStars": 2
   }
 }
