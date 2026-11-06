@@ -21,6 +21,10 @@ try:
     import msnr_subs as SUBS
 except Exception:                           # لا يُوقف البوت إن غاب هذا الملف مؤقتاً
     SUBS = None
+try:
+    import msnr_alerts as PAL                           # بوت تنبيهات الأسعار (اختياري: يعمل إن وُجد سرّ ALERTS_BOT_TOKEN)
+except Exception:
+    PAL = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "sh_state.json")
@@ -389,7 +393,7 @@ def compute(cfg, state):
 
 
 CODE_FILES = ["sh_engine.py", "sh_messages.py", "sh_actions.py", "sh_config.json", "crt_bot.py", "msnr_engine.py", "msnr_actions.py", "msnr_pro.py", "msnr_msgs.py",
-              "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_subs.py", "msnr_map.py", "msnr_config.json", "sh_track.py"]
+              "msnr_v3.py", "msnr_v4.py", "msnr_plan.py", "msnr_msgs3.py", "msnr_subs.py", "msnr_alerts.py", "msnr_map.py", "msnr_config.json", "sh_track.py"]
 
 
 def code_changed():
@@ -542,6 +546,13 @@ def main():
         if hasattr(tg, "start_poll_thread"):
             tg.start_poll_thread()                              # استقبال فوري لأوامر صاحب البوت
         tg.tz = cfg.get("displayTz", "Asia/Hebron")
+    pa = None
+    _atok = os.environ.get("ALERTS_BOT_TOKEN", "").strip()
+    if _atok and PAL is not None:
+        try:
+            pa = PAL.PriceAlerts(_atok, cfg["chatId"], state, fresh_price, log); pa.start()      # بوت تنبيهات الأسعار المستقل
+        except Exception as exa:
+            log(f"بوت التنبيهات: {exa}")
     yh1 ={"t": 0, "bars": []}
     max_age = cfg.get("maxAgeMin", 60) * 60
     beat_every = float(cfg.get("heartbeatHours", 2)) * 3600
@@ -689,6 +700,13 @@ def main():
                         save_state(state); commit_state(); tg.dirty = False
             except Exception as exs:
                 log(f"مشتركون: {exs}")
+            if pa is not None and SPOT_BUF:
+                try:
+                    pa.check(SPOT_BUF[-1][1])                                         # تنبيهات الأسعار: قرب ← وصول
+                    if pa.dirty:
+                        save_state(state); commit_state(); pa.dirty = False
+                except Exception as exa:
+                    log(f"تنبيهات: {exa}")
             if MS is not None and SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 30:
                 try:
                     bnd = int(time.time()) // 300
