@@ -56,6 +56,16 @@ def _ago(t):
     return f"{d // 86400} يوم" if d >= 86400 else f"{d // 3600} س" if d >= 3600 else f"{max(d // 60, 1)} د"
 
 
+def cal_add(state, off, now):
+    """يضيف قراءة معايرة ويعتمد وسيط آخر 5 قراءات خلال 6 ساعات (يلغي خطأ التوقيت عند الكتابة). يعيد (الوسيط، التشتت، العدد، التغيّر عن السابق)."""
+    L = [x for x in state.get("pcal_s", []) if now - x[0] < 6 * 3600] + [[now, off]]
+    L = L[-5:]; state["pcal_s"] = L
+    v = sorted(x[1] for x in L); n = len(v)
+    med = v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+    prev = state.get("pcal"); state["pcal"] = round(med, 3)
+    return med, v[-1] - v[0], n, (None if prev is None else med - prev)
+
+
 class Broadcast:
     def __init__(self, tg, state, code="", max_subs=100, log=print):
         self.tg = tg; self.state = state; self.code = str(code or ""); self.max_subs = int(max_subs); self.log = log
@@ -340,10 +350,12 @@ class Broadcast:
             return
         self.state["pshift"] = round(x - cur, 3)
         raw = self.raw_fn() if self.raw_fn else None
+        extra = ""
         if raw is not None:
-            self.state["pcal"] = round(x - raw, 3)                      # معايرة ثابتة مرتبطة بسعر الوسيط الخام: لا تتأثر بتذبذب مقياس البوت
+            med, spread, n, drift = cal_add(self.state, x - raw, time.time())          # معايرة ثابتة مرتبطة بسعر الوسيط الخام (Bid)
+            extra = f"\n📊 القراءات: {n} · تشتّتها ±{spread / 2:.2f}$" + ("" if drift is None else f" · تغيّر عن المعايرة السابقة {drift:+.2f}$")
         self.dirty = True
-        self._post(cid, f"✅ ضُبطت المعايرة: فرق منصتك عن مصدر البوت <b>{x - cur:+.2f}$</b>.\nمن الآن كل الأسعار في الرسائل تطابق منصتك عند <code>{x:.2f}</code>. أعد المعايرة (<code>سعر ...</code>) متى لاحظت فرقًا.", silent=True)
+        self._post(cid, f"✅ ضُبطت المعايرة: فرق منصتك عن مصدر البوت <b>{x - cur:+.2f}$</b>.\nمن الآن كل الأسعار في الرسائل تطابق منصتك عند <code>{x:.2f}</code>. أعد المعايرة (<code>سعر ...</code>) متى لاحظت فرقًا: كل قراءة جديدة تُدمج مع السابقة فتزداد الدقة." + extra, silent=True)
 
     def _trade_cmd(self, cid, word):
         """«الغاء» يلغي آخر أمر معلّق، و«اغلاق» يغلق آخر صفقة مفتوحة بالسعر الآن، ويُعلَم المشتركون."""

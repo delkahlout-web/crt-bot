@@ -180,16 +180,16 @@ START_T = time.time()
 
 
 SQ_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
-SQ = {"delta": None, "pairs": [], "ok": 0, "fail": 0, "t": 0.0, "up": None, "used": 0, "raw": None, "ga": 0.0}      # مصدر لحظي (Swissquote): فرق ثابت عن gold-api لإبقاء مقياس الأسعار كما هو
+SQ = {"delta": None, "pairs": [], "ok": 0, "fail": 0, "t": 0.0, "up": None, "used": 0, "raw": None, "ga": 0.0, "spr": 0.66}      # مصدر لحظي (Swissquote): فرق ثابت عن gold-api لإبقاء مقياس الأسعار كما هو
 
 
 def sq_mid():
     """منتصف سعر البيع/الشراء اللحظي من Swissquote (يتحدّث كل ثانيتين تقريباً) أو None."""
     try:
         pr = requests.get(SQ_URL, timeout=3, headers={"User-Agent": "Mozilla/5.0"}).json()[0]["spreadProfilePrices"][0]
-        m = (float(pr["bid"]) + float(pr["ask"])) / 2
-        if m > 0:
-            SQ["ok"] += 1; SQ["t"] = time.time(); SQ["raw"] = m
+        bid = float(pr["bid"]); ask = float(pr["ask"]); m = (bid + ask) / 2
+        if m > 0 and ask >= bid:
+            SQ["ok"] += 1; SQ["t"] = time.time(); SQ["raw"] = bid; SQ["spr"] = ask - bid       # المعروض = سعر البيع (Bid) كما يظهر على شارت المنصات
             return m
     except Exception:
         pass
@@ -198,8 +198,8 @@ def sq_mid():
 
 
 def fresh_raw():
-    """قراءة Swissquote الخام الآن (بلا إزاحة) أو None."""
-    return sq_mid()
+    """سعر البيع (Bid) الخام الآن من Swissquote (بلا إزاحة) أو None."""
+    return SQ["raw"] if sq_mid() is not None else None
 
 
 def fresh_price():
@@ -238,8 +238,8 @@ def sample_spot(sym="XAU"):
     except Exception:
         p = None
     if m is not None and p is not None and up and up != SQ["up"] and age is not None and age <= 12:      # تحديث جديد لـ gold-api: القياس الآن دقيق
-        SQ["up"] = up; SQ["pairs"] = (SQ["pairs"] + [p - m])[-30:]
-        if len(SQ["pairs"]) >= 5:
+        SQ["up"] = up; SQ["pairs"] = (SQ["pairs"] + [p - m])[-120:]                  # نافذة ساعتين: ضجيج تأخر gold-api متماثل فيُلغيه الوسيط
+        if len(SQ["pairs"]) >= (5 if SQ["delta"] is None else 20):                  # بعد أول قيمة لا نحدّثها إلا بـ 20 قراءة فأكثر: فرق المصدرين بطيء التغيّر
             s_ = sorted(SQ["pairs"]); SQ["delta"] = s_[len(s_) // 2]
     if m is not None and SQ["delta"] is not None and abs(SQ["delta"]) < 25:
         q = m + SQ["delta"]
@@ -481,6 +481,8 @@ def health_text(state, tg, MS, tz):
             f"🎯 صفقات الجلسة: {pl.get('w', 0)} رابحة / {pl.get('l', 0)} خاسرة"]
     live_q = SQ["ok"] > 0 and now - SQ["t"] < 30 and SQ["delta"] is not None
     rows.append(("📡 مصدر السعر: Swissquote لحظي (فرق عن gold-api " + f"{SQ['delta']:+.2f}$)" if live_q else "📡 مصدر السعر: gold-api (Swissquote غير متاح)") + f"  ·  عيّنات لحظية {SQ['used']} · إخفاقات {SQ['fail']}")
+    cs = state.get("pcal_s") or []
+    rows.append(f"📐 المعايرة: {state.get('pcal', 0):+.2f}$ · {len(cs)} قراءات" + (f" · آخرها قبل {(now - cs[-1][0]) / 60:.0f} د" if cs else " · لم تُعايَر بعد (اكتب: سعر + سعر منصتك)"))
     au = MS.st.get("audit") if MS is not None else None
     if au:
         rows.append(f"🔎 آخر فحص ذاتي: قبل {(now - au['t']) / 60:.0f} د — " + ("سليم" if au["ok"] else "ملاحظات: " + " | ".join(au["bad"][:3])) + f"  ({au['n']} مستوى مسجّل)")
@@ -537,7 +539,7 @@ def main():
         """الإزاحة المعروضة: معايرتك مرتبطة بسعر Swissquote الخام (ثابتة)، فتتبع ما يتحرك من الفرق بين مصدرَي البوت تلقائيًا."""
         pc = state.get("pcal")
         if pc is not None and SQ["delta"] is not None:
-            return float(pc) - SQ["delta"]
+            return float(pc) - SQ["delta"] - SQ["spr"] / 2           # المقياس الداخلي منتصف السعرين؛ المعروض Bid فنطرح نصف السبريد
         return float(state.get("pshift") or 0.0)
     if SQ["delta"] is None and isinstance(state.get("sqd"), (int, float)):
         SQ["delta"] = float(state["sqd"])

@@ -29,6 +29,16 @@ HELP = ("🔔 <b>بوت تنبيهات الأسعار</b>\n┈┈┈┈┈┈┈
         "<i>الأسعار من وسيط حقيقي لحظي، وتتطابق مع منصتك بعد المعايرة.</i>")
 
 
+def cal_add(state, off, now):
+    """يضيف قراءة معايرة ويعتمد وسيط آخر 5 قراءات خلال 6 ساعات (يلغي خطأ التوقيت عند الكتابة). يعيد (الوسيط، التشتت، العدد، التغيّر عن السابق)."""
+    L = [x for x in state.get("pcal_s", []) if now - x[0] < 6 * 3600] + [[now, off]]
+    L = L[-5:]; state["pcal_s"] = L
+    v = sorted(x[1] for x in L); n = len(v)
+    med = v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+    prev = state.get("pcal"); state["pcal"] = round(med, 3)
+    return med, v[-1] - v[0], n, (None if prev is None else med - prev)
+
+
 class PriceAlerts:
     def __init__(self, token, owner_id, state, price_fn, log=print, shift_fn=None, raw_fn=None):
         self.base = f"https://api.telegram.org/bot{token}"
@@ -155,7 +165,7 @@ class PriceAlerts:
         self.state["pshift"] = round(x - cur, 3)
         raw = self.raw_fn() if self.raw_fn else None
         if raw is not None:
-            self.state["pcal"] = round(x - raw, 3)
+            cal_add(self.state, x - raw, time.time())
         self.dirty = True
         self._post(f"✅ ضُبطت المعايرة: <b>{x - cur:+.2f}$</b>. الأسعار تطابق منصتك عند <code>{x:.2f}</code>.", silent=True)
 
