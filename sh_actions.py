@@ -180,7 +180,7 @@ START_T = time.time()
 
 
 SQ_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
-SQ = {"delta": None, "pairs": [], "ok": 0, "fail": 0, "t": 0.0, "up": None, "used": 0}      # مصدر لحظي (Swissquote): فرق ثابت عن gold-api لإبقاء مقياس الأسعار كما هو
+SQ = {"delta": None, "pairs": [], "ok": 0, "fail": 0, "t": 0.0, "up": None, "used": 0, "raw": None, "ga": 0.0}      # مصدر لحظي (Swissquote): فرق ثابت عن gold-api لإبقاء مقياس الأسعار كما هو
 
 
 def sq_mid():
@@ -189,12 +189,17 @@ def sq_mid():
         pr = requests.get(SQ_URL, timeout=3, headers={"User-Agent": "Mozilla/5.0"}).json()[0]["spreadProfilePrices"][0]
         m = (float(pr["bid"]) + float(pr["ask"])) / 2
         if m > 0:
-            SQ["ok"] += 1; SQ["t"] = time.time()
+            SQ["ok"] += 1; SQ["t"] = time.time(); SQ["raw"] = m
             return m
     except Exception:
         pass
     SQ["fail"] += 1
     return None
+
+
+def fresh_raw():
+    """قراءة Swissquote الخام الآن (بلا إزاحة) أو None."""
+    return sq_mid()
 
 
 def fresh_price():
@@ -203,7 +208,7 @@ def fresh_price():
     if m is not None and SQ["delta"] is not None and abs(SQ["delta"]) < 25:
         q = m + SQ["delta"]; t = time.time()
         if not SPOT_BUF or abs(q - SPOT_BUF[-1][1]) < 15:
-            SPOT_BUF.append((t, q)); del SPOT_BUF[:-6000]
+            SPOT_BUF.append((t, q)); del SPOT_BUF[:-12000]
             return q, t
     if SPOT_BUF and time.time() - SPOT_BUF[-1][0] < 60:
         return SPOT_BUF[-1][1], SPOT_BUF[-1][0]
@@ -214,7 +219,12 @@ def sample_spot(sym="XAU"):
     """عيّنة سعر كل ~4 ث. gold-api يتحدّث كل ~60 ث فتضيع قمم/قيعان الشموع؛ لذا نضيف عيّنات Swissquote اللحظية بعد إزاحتها بالفرق الوسيط
     بين المصدرين (يُقاس عند كل تحديث جديد لـ gold-api) فتبقى مستويات الشموع المحفوظة صحيحة. إن تعذّر Swissquote نعود لـ gold-api وحده."""
     p = None; age = None; up = None
+    m = sq_mid()
+    need_ga = SQ["delta"] is None or m is None or time.time() - SQ["ga"] >= 10          # gold-api لقياس الفرق فقط (يتحدّث كل ~60 ث)
     try:
+        if not need_ga:
+            raise StopIteration
+        SQ["ga"] = time.time()
         j = requests.get(SPOT_URL.format(sym), timeout=8, headers={"User-Agent": "Mozilla/5.0"}).json()
         p = float(j["price"]); up = j.get("updatedAt")
         try:                                                      # المصدر يحدّث السعر كل ~60 ث؛ نتجاهل سعراً أقدم من 150 ث (مصدر متجمّد)
@@ -227,7 +237,6 @@ def sample_spot(sym="XAU"):
             p = None
     except Exception:
         p = None
-    m = sq_mid()
     if m is not None and p is not None and up and up != SQ["up"] and age is not None and age <= 12:      # تحديث جديد لـ gold-api: القياس الآن دقيق
         SQ["up"] = up; SQ["pairs"] = (SQ["pairs"] + [p - m])[-30:]
         if len(SQ["pairs"]) >= 5:
@@ -235,10 +244,10 @@ def sample_spot(sym="XAU"):
     if m is not None and SQ["delta"] is not None and abs(SQ["delta"]) < 25:
         q = m + SQ["delta"]
         if not SPOT_BUF or abs(q - SPOT_BUF[-1][1]) < 15:         # حماية من قراءة شاذة
-            SPOT_BUF.append((time.time(), q)); del SPOT_BUF[:-6000]; SQ["used"] += 1
+            SPOT_BUF.append((time.time(), q)); del SPOT_BUF[:-12000]; SQ["used"] += 1
             return
     if p is not None:
-        SPOT_BUF.append((time.time(), p)); del SPOT_BUF[:-6000]
+        SPOT_BUF.append((time.time(), p)); del SPOT_BUF[:-12000]
 
 
 def spot_bars(now):
@@ -523,6 +532,13 @@ def main():
     handover = False
     sent = set(state["sent"])
     PERSIST.update({int(b["time"]): b for b in state.get("spot", [])})
+
+    def disp_shift():
+        """الإزاحة المعروضة: معايرتك مرتبطة بسعر Swissquote الخام (ثابتة)، فتتبع ما يتحرك من الفرق بين مصدرَي البوت تلقائيًا."""
+        pc = state.get("pcal")
+        if pc is not None and SQ["delta"] is not None:
+            return float(pc) - SQ["delta"]
+        return float(state.get("pshift") or 0.0)
     if SQ["delta"] is None and isinstance(state.get("sqd"), (int, float)):
         SQ["delta"] = float(state["sqd"])
     try:
@@ -542,6 +558,7 @@ def main():
         tg.owner_handlers["/health"] = lambda: health_text(state, tg, MS, cfg.get("displayTz", "Asia/Hebron"))
         tg.bump("starts")
 
+        tg.shift_fn = disp_shift; tg.raw_fn = fresh_raw
         tg.price_fn = fresh_price                               # سعر لحظي وقت تنفيذ الأمر (Swissquote) لا آخر عيّنة قديمة
         if hasattr(tg, "start_poll_thread"):
             tg.start_poll_thread()                              # استقبال فوري لأوامر صاحب البوت
@@ -550,7 +567,7 @@ def main():
     _atok = os.environ.get("ALERTS_BOT_TOKEN", "").strip()
     if _atok and PAL is not None:
         try:
-            pa = PAL.PriceAlerts(_atok, cfg["chatId"], state, fresh_price, log); pa.start()      # بوت تنبيهات الأسعار المستقل
+            pa = PAL.PriceAlerts(_atok, cfg["chatId"], state, fresh_price, log, shift_fn=disp_shift, raw_fn=fresh_raw); pa.start()      # بوت تنبيهات الأسعار المستقل
         except Exception as exa:
             log(f"بوت التنبيهات: {exa}")
     yh1 ={"t": 0, "bars": []}
@@ -691,7 +708,7 @@ def main():
         # دورة سريعة (~20 ث): عيّنة سعر كل ~4 ثوانٍ، وMSNR يفحص لمس المستوى/الرفض/إعادة الاختبار بالسعر الحي فوراً
         t_end = time.time() + 20
         while time.time() < t_end:
-            time.sleep(4); sample_spot(cfg.get("spotSym", "XAU")); HB["t"] = time.time()
+            time.sleep(1.5); sample_spot(cfg.get("spotSym", "XAU")); HB["t"] = time.time()
             try:
                 if hasattr(tg, "poll"):
                     tg.poll()                                                     # /start و/stop من المشتركين (رد خلال ثوانٍ)

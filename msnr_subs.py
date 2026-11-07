@@ -70,6 +70,7 @@ class Broadcast:
         state.setdefault("mtr", [])
         state.setdefault("pshift", 0.0)                              # معايرة الأسعار: فرق (سعر وسيطك − سعر البوت) يُضاف لكل الأسعار الظاهرة
         self._pt = False; self._pth = None
+        self.shift_fn = None; self.raw_fn = None                    # إزاحة العرض (معايرتك) وقراءة المصدر الخام
         state.setdefault("mdef", dict(sl=30.0, tp=100.0, sp=3.0))      # القيم الافتراضية للتوصية: وقف 30 · هدف 100 · سبريد 3 نقاط
         self.base = tg.base; self.token = tg.token; self.chat_id = tg.chat_id
         self._lock = threading.Lock(); self._menu = False
@@ -83,9 +84,15 @@ class Broadcast:
             st.clear(); st["day"] = day
         st[key] = st.get(key, 0) + n
 
+    def _shift(self):
+        try:
+            return float(self.shift_fn()) if self.shift_fn else float(self.state.get("pshift") or 0.0)
+        except Exception:
+            return float(self.state.get("pshift") or 0.0)
+
     def _px(self, text):
         """يُزيح كل الأسعار الظاهرة (داخل <code> أو <b>) بفرق المعايرة ليطابق سعر وسيط صاحب البوت."""
-        sh = float(self.state.get("pshift") or 0.0)
+        sh = self._shift()
         if abs(sh) < 1e-9:
             return text
 
@@ -319,19 +326,23 @@ class Broadcast:
         if not pr or time.time() - pr[1] > 60:
             self._post(cid, "⚠️ لا يوجد سعر حديث الآن. أعد المحاولة بعد لحظات.")
             return
-        cur = pr[0]; sh = float(self.state.get("pshift") or 0.0)
+        cur = pr[0]; sh = self._shift()
         if arg is None:
             self._post(cid, f"📐 المعايرة الحالية: <b>{sh:+.2f}$</b>\nسعر البوت الآن (بعد المعايرة): <code>{cur + sh:.2f}</code>\nاكتب <code>سعر</code> ثم السعر الذي تراه على منصتك لتضبطها، مثال: <code>سعر 4041.32</code>", silent=True)
             return
         if arg == "صفر":
-            self.state["pshift"] = 0.0; self.dirty = True
+            self.state["pshift"] = 0.0; self.state.pop("pcal", None); self.dirty = True
             self._post(cid, "✅ أُلغيت المعايرة: الأسعار كما يراها البوت.", silent=True)
             return
         x = float(arg)
         if not 1000 < x < 20000 or abs(x - cur) > 15:
             self._post(cid, f"⚠️ الرقم بعيد عن سعر البوت ({cur:.2f}). تأكد منه وأعد الكتابة.")
             return
-        self.state["pshift"] = round(x - cur, 3); self.dirty = True
+        self.state["pshift"] = round(x - cur, 3)
+        raw = self.raw_fn() if self.raw_fn else None
+        if raw is not None:
+            self.state["pcal"] = round(x - raw, 3)                      # معايرة ثابتة مرتبطة بسعر الوسيط الخام: لا تتأثر بتذبذب مقياس البوت
+        self.dirty = True
         self._post(cid, f"✅ ضُبطت المعايرة: فرق منصتك عن مصدر البوت <b>{x - cur:+.2f}$</b>.\nمن الآن كل الأسعار في الرسائل تطابق منصتك عند <code>{x:.2f}</code>. أعد المعايرة (<code>سعر ...</code>) متى لاحظت فرقًا.", silent=True)
 
     def _trade_cmd(self, cid, word):

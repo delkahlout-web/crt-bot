@@ -30,9 +30,10 @@ HELP = ("🔔 <b>بوت تنبيهات الأسعار</b>\n┈┈┈┈┈┈┈
 
 
 class PriceAlerts:
-    def __init__(self, token, owner_id, state, price_fn, log=print):
+    def __init__(self, token, owner_id, state, price_fn, log=print, shift_fn=None, raw_fn=None):
         self.base = f"https://api.telegram.org/bot{token}"
         self.owner = str(owner_id); self.state = state; self.price_fn = price_fn; self.log = log
+        self.shift_fn = shift_fn; self.raw_fn = raw_fn
         self.al = state.setdefault("pa", [])                       # [{id,p,near,st}]
         self.cfg = state.setdefault("pacfg", {"near": 3.0})
         self.dirty = False; self.prev = None; self.started = False; self._menu = False
@@ -49,8 +50,14 @@ class PriceAlerts:
             self.log(f"تنبيهات: {ex}")
             return False
 
+    def _shift(self):
+        try:
+            return float(self.shift_fn()) if self.shift_fn else float(self.state.get("pshift") or 0.0)
+        except Exception:
+            return float(self.state.get("pshift") or 0.0)
+
     def shown(self, internal):
-        return internal + float(self.state.get("pshift") or 0.0)
+        return internal + self._shift()
 
     # ───────────── التنبيه ─────────────
     def check(self, internal):
@@ -136,16 +143,20 @@ class PriceAlerts:
         cur = self._now()
         if cur is None:
             self._post("⚠️ لا يوجد سعر حديث الآن."); return
-        sh = float(self.state.get("pshift") or 0.0)
+        sh = self._shift()
         if arg is None:
             self._post(f"💲 السعر الآن: <code>{cur + sh:.2f}</code>  (معايرتك {sh:+.2f}$)", silent=True); return
         if arg == "صفر":
-            self.state["pshift"] = 0.0; self.dirty = True
+            self.state["pshift"] = 0.0; self.state.pop("pcal", None); self.dirty = True
             self._post("✅ أُلغيت المعايرة.", silent=True); return
         x = float(arg)
         if not 1000 < x < 20000 or abs(x - cur) > 15:
             self._post(f"⚠️ الرقم بعيد عن سعر البوت ({cur:.2f}). تأكد منه."); return
-        self.state["pshift"] = round(x - cur, 3); self.dirty = True
+        self.state["pshift"] = round(x - cur, 3)
+        raw = self.raw_fn() if self.raw_fn else None
+        if raw is not None:
+            self.state["pcal"] = round(x - raw, 3)
+        self.dirty = True
         self._post(f"✅ ضُبطت المعايرة: <b>{x - cur:+.2f}$</b>. الأسعار تطابق منصتك عند <code>{x:.2f}</code>.", silent=True)
 
     # ───────────── الاستقبال (استطلاع طويل في خيط) ─────────────
